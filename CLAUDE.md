@@ -14,17 +14,23 @@ React (frontend/) ──▶ FastAPI (backend/app) ──▶ Alpaca (paper → li
 
 ## Layout
 
-- `backend/app/main.py` — app entrypoint; starts the background monitor loop.
+- `backend/app/main.py` — app entrypoint; checks the schema revision, starts the monitor loop.
+- `backend/app/db_migrate.py` — `python -m app.db_migrate`; Alembic revisions in `backend/migrations/`.
+- `backend/app/logging_config.py` — structured JSON logs; use `log_event(logger, "event", **fields)`.
 - `backend/app/config.py` — every setting, read from `backend/.env`.
 - `backend/app/routers/` — HTTP routes (`analysis`, `intents`, `orders`, `automation`, `risk`, `monitor`, ...).
 - `backend/app/services/`
   - `data_aggregator.py` — Alpaca quotes/bars/news → indicator context.
   - `prescreener.py` — deterministic ranking; only the top N reach Claude.
-  - `analyst.py` — Claude prompts and response parsing.
+  - `llm.py` — the ONLY Claude client: role-based model/effort routing, structured outputs,
+    fail-closed handling, token/cost ledger (`llm_calls`). Never call the SDK elsewhere.
+  - `analyst.py` — Claude prompts.
+  - `intent_validation.py` — fail-closed checks on model output (staleness, limit price, evidence).
   - `risk.py` — **the** hard rules (pure, unit-tested).
   - `execution.py` — re-validates risk and submits orders (shared by manual + automated paths).
   - `broker.py` — the only module that talks to Alpaca's trading API.
-  - `automation.py` — gates for autonomous execution.
+  - `automation.py` — modes (manual/observe/auto), kill switch, and `order_gate()`, which every
+    automated order path must check right before calling the broker.
   - `monitor.py` — background loop: safety backstop + optional continuous AI monitor.
 - `backend/tests/` — pytest suite; pure logic, no network, no real broker or Claude calls.
 - `frontend/src/` — React 18 + Vite 6 dashboard (plain JSX, no router).
@@ -35,9 +41,14 @@ React (frontend/) ──▶ FastAPI (backend/app) ──▶ Alpaca (paper → li
 # Backend (from backend/)
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
-ruff check app tests          # lint (same as CI)
-pytest -q                     # tests (same as CI)
+ruff check app tests migrations   # lint (same as CI)
+pytest -q                         # tests (same as CI)
+TEST_DATABASE_URL=postgresql+psycopg://localhost:5432/trading_assistant_test pytest -q  # + migration tests
+python -m app.db_migrate          # upgrade the schema (back up real data first)
 uvicorn app.main:app --reload --port 8000
+
+# New migration: change app/models.py, then (against a scratch database)
+alembic revision --autogenerate -m "<what changed>"   # review the file before committing
 
 # Frontend (from frontend/)
 npm ci
@@ -65,13 +76,17 @@ npm run dev                   # http://localhost:5173
 - Python 3.12, line length 110, `ruff` clean. Keep pure logic (risk, triggers, prescreen,
   position math) free of DB/network so it stays unit-testable.
 - Every state change that matters is written to `audit_log` via `deps.audit()`.
+- Schema changes only through Alembic revisions; never DDL at startup. Migrations must
+  upgrade and downgrade cleanly and preserve data.
+- Claude output is untrusted until validated: structured outputs + Pydantic + the checks
+  in `intent_validation.py` and `risk.py`. On any doubt, fail closed.
 - Small, focused PRs; one issue per branch named `agent/<issue>-<slug>`; never push to
   `main` or `Production` directly.
 
 ## Definition of done
 
-- `ruff check app tests` and `pytest -q` pass locally and in CI; `npm run build` passes if
-  the frontend changed.
+- `ruff check app tests migrations` and `pytest -q` pass locally and in CI (including the
+  migration tests); `npm run build` passes if the frontend changed.
 - New behavior has tests, including failure paths (bad model output, broker errors).
 - No change can submit an order that would not have passed risk validation, and no
   automated path bypasses the automation gates.

@@ -217,6 +217,27 @@ The watcher's INVESTIGATE / REVIEW_POSITION jobs become research:
 - A bundle is `ready` for the strategist once the technical analysis succeeds. Single
   instance, research-role cost ceilings, heartbeats, `GET /research/bundles`. Never trades.
 
+## Opus strategist
+
+```bash
+STRATEGIST_WORKER_ENABLED=true python -m app.workers.strategist_worker   # from backend/
+```
+
+- Takes each `ready` bundle and sends `STRATEGIST_MODEL` (Opus) the analyst reports, the
+  evidence, explicit **conflicts between analysts**, the portfolio's exposure, and this
+  strategy's own track record from the trade journal, with
+  `backend/skills/trade-strategist/SKILL.md` as its instructions. Abstaining is a valid answer.
+- **Every proposal is validated and stored** (`strategy_proposals`): the symbol must match;
+  every cited evidence id must exist in the bundle; the entry range must be within
+  `MAX_LIMIT_DEVIATION_PCT` of the bundle's quote; stop below / target above entry (mirrored
+  for sells, which need a held position); size clamped to `MAX_POSITION_PCT`; stale, expired,
+  future-dated or non-finite data is rejected; one pending strategist intent per symbol.
+- An accepted BUY/SELL becomes a **pending** trade intent (`opus-strategist`) through the same
+  output checks and risk engine as every other intent. It is never executed by the strategist;
+  it waits for approval (or the automation gate).
+- Single instance, Opus cost ceilings (`STRATEGIST_*_BUDGET_USD`), heartbeats,
+  `GET /proposals`, `GET /proposals/{id}`.
+
 ## Backtesting
 
 `app/backtest/` replays strategies over stored daily bars (`market_bars`) with the same

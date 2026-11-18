@@ -103,7 +103,9 @@ def approve_intent(intent_id: int, db: Session = DB, actor: str = Actor):
     """The manual approval gate. Re-validates risk against FRESH state, then submits a
     bracket order to the broker. Still the primary human path from intent to order —
     autonomous trading is additive and does not replace this."""
-    intent = db.get(TradeIntent, intent_id)
+    # Row lock + fresh read: a concurrent duplicate approve waits here, then sees the intent
+    # already submitted and gets a 409 instead of placing a second order.
+    intent = db.get(TradeIntent, intent_id, with_for_update=True, populate_existing=True)
     if not intent:
         raise HTTPException(status_code=404, detail="Intent not found")
     if intent.status != IntentStatus.pending_approval:

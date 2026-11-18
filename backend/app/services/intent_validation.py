@@ -27,6 +27,22 @@ def _v(code: str, message: str) -> dict:
     return {"code": code, "message": message}
 
 
+def check_limit_price(limit_price, last_price: float | None, max_limit_deviation_pct: float) -> list[dict]:
+    """The limit must be positive and within `max_limit_deviation_pct` of the last price.
+    Shared by intent validation and the pre-submit entry guard in execution."""
+    limit = float(limit_price or 0)
+    if limit <= 0:
+        return [_v("INVALID_LIMIT_PRICE", "limit_price must be greater than 0")]
+    if not last_price or last_price <= 0:
+        return [_v("NO_MARKET_PRICE", "no last price to verify the limit price against")]
+    deviation = abs(limit / last_price - 1) * 100
+    if deviation > max_limit_deviation_pct:
+        return [_v("LIMIT_PRICE_OFF_MARKET",
+                   f"limit {limit:.2f} is {deviation:.1f}% from last price "
+                   f"{last_price:.2f} (max {max_limit_deviation_pct:.0f}%)")]
+    return []
+
+
 def validate_intent(intent: dict, *, last_price: float | None, data_age_sec: float,
                     max_data_age_sec: float, max_limit_deviation_pct: float,
                     quality: dict | None = None) -> list[dict]:
@@ -46,17 +62,7 @@ def validate_intent(intent: dict, *, last_price: float | None, data_age_sec: flo
         violations.append(_v("STALE_DATA", f"market data was {data_age_sec:.0f}s old at decision "
                                            f"time (max {max_data_age_sec:.0f}s)"))
 
-    limit = float(intent.get("limit_price") or 0)
-    if limit <= 0:
-        violations.append(_v("INVALID_LIMIT_PRICE", "limit_price must be greater than 0"))
-    elif not last_price or last_price <= 0:
-        violations.append(_v("NO_MARKET_PRICE", "no last price to verify the limit price against"))
-    else:
-        deviation = abs(limit / last_price - 1) * 100
-        if deviation > max_limit_deviation_pct:
-            violations.append(_v("LIMIT_PRICE_OFF_MARKET",
-                                 f"limit {limit:.2f} is {deviation:.1f}% from last price "
-                                 f"{last_price:.2f} (max {max_limit_deviation_pct:.0f}%)"))
+    violations += check_limit_price(intent.get("limit_price"), last_price, max_limit_deviation_pct)
 
     stop = float(intent.get("stop_loss_percent") or 0)
     if not 0 < stop <= MAX_STOP_LOSS_PCT:

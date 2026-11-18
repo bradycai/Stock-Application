@@ -467,3 +467,68 @@ class ReviewReport(Base):
     summary: Mapped[str | None] = mapped_column(Text)
     data: Mapped[dict] = mapped_column(JSONB, nullable=False)
     llm_run_id: Mapped[str | None] = mapped_column(String)
+
+
+# Research data (issue #6)
+class Company(Base):
+    """Reference data per symbol (SEC EDGAR): CIK, SIC and a derived sector."""
+    __tablename__ = "companies"
+
+    symbol: Mapped[str] = mapped_column(String, primary_key=True)
+    cik: Mapped[str | None] = mapped_column(String)
+    name: Mapped[str | None] = mapped_column(String)
+    sic: Mapped[str | None] = mapped_column(String)
+    sic_description: Mapped[str | None] = mapped_column(String)
+    sector: Mapped[str | None] = mapped_column(String)
+    industry: Mapped[str | None] = mapped_column(String)
+    exchange: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())
+
+
+class Fundamental(Base):
+    """One XBRL fact. `filed_at` is the release date: use it (not period_end) for point-in-time."""
+    __tablename__ = "fundamentals"
+    __table_args__ = (UniqueConstraint("symbol", "metric", "period_end", "form", name="uq_fundamentals_key"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    cik: Mapped[str | None] = mapped_column(String)
+    metric: Mapped[str] = mapped_column(String, nullable=False)  # revenue | net_income | eps_diluted | ...
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    fiscal_period: Mapped[str | None] = mapped_column(String)    # FY | Q1 | Q2 | Q3
+    form: Mapped[str] = mapped_column(String, nullable=False)    # 10-K | 10-Q
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str | None] = mapped_column(String)
+    filed_at: Mapped[date | None] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="sec_edgar")
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Filing(Base):
+    __tablename__ = "filings"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    cik: Mapped[str | None] = mapped_column(String)
+    accession: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    form: Mapped[str] = mapped_column(String, nullable=False)
+    filed_at: Mapped[date | None] = mapped_column(Date)
+    period_of_report: Mapped[date | None] = mapped_column(Date)
+    url: Mapped[str | None] = mapped_column(Text)
+
+
+class MacroObservation(Base):
+    """A FRED observation. Vintages (realtime_start) are kept for point-in-time backtests."""
+    __tablename__ = "macro_observations"
+    __table_args__ = (UniqueConstraint("series_id", "observation_date", "realtime_start",
+                                       name="uq_macro_obs_key"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    series_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    observation_date: Mapped[date] = mapped_column(Date, nullable=False)
+    value: Mapped[float | None] = mapped_column(Float)
+    realtime_start: Mapped[date] = mapped_column(Date, nullable=False)
+    realtime_end: Mapped[date | None] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String, nullable=False, default="fred")
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

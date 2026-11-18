@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     # Optional data sources
     news_api_key: str = ""
 
+    # Research data (SEC EDGAR fundamentals, FRED macro). Both are refreshed only by the CLI
+    # (python -m app.services.research_data.refresh), never inside a web request.
+    sec_user_agent: str = ""            # SEC needs a descriptive UA with contact; "" = EDGAR off
+    fred_api_key: str = ""              # "" = FRED disabled
+    sec_max_requests_per_sec: float = 5.0   # client-side limit (SEC allows 10; we stay at <= 5)
+    research_http_timeout_sec: float = 20.0
+
     # Market data layer (batched Alpaca requests + snapshot store)
     alpaca_data_feed: str = ""          # "" = the account's default feed (IEX on free plans); "iex" | "sip"
     data_chunk_size: int = 100          # symbols per batched Alpaca request

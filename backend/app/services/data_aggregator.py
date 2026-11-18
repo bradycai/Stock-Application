@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.logging_config import log_event, safe_error
 from app.services import broker, market_context, market_data, news_store, snapshots
+from app.services.research_data import store as research_store
 from app.services.indicators import (  # noqa: F401  (re-exported for older imports)
     atr as _atr,
     ema_series as _ema_series,
@@ -116,14 +117,49 @@ def _newsapi_articles(symbols: list[str], limit: int) -> list[dict]:
     return out
 
 
-def _fundamentals(symbol: str) -> dict:
-    """Earnings date and analyst rating changes.
+def _fundamentals(symbol: str, db: Session | None = None) -> dict:
+    """Earnings date, analyst rating changes and stored SEC fundamentals.
 
-    No fundamentals/ratings provider is wired in yet, so these are null — explicitly
-    unavailable, never faked and never an empty list that could read as "no actions". The
-    quality flags list them as missing.
+    No earnings-calendar/ratings provider is wired in yet, so those are null — explicitly
+    unavailable, never faked and never an empty list that could read as "no actions".
+    SEC EDGAR values are read from the database only (filled by the refresh CLI); anything
+    not stored stays null. The quality flags list every null as missing.
     """
-    return {"earnings_date": None, "analyst_actions": None}
+    out = {"earnings_date": None, "analyst_actions": None}
+    if db is None:
+        return out
+    try:
+        with db.begin_nested():
+            out.update(research_store.fundamentals_block(db, symbol))
+    except Exception as e:  # noqa: BLE001 - research data must not break the run
+        log_event(logger, "data.fundamentals_failed", logging.WARNING, error=safe_error(e))
+    return out
+
+
+def _sector_for(symbol: str, db: Session | None) -> str | None:
+    """Sector from the companies table (SEC SIC mapping), falling back to the static map."""
+    if db is not None:
+        try:
+            with db.begin_nested():
+                sector = research_store.company_sector(db, symbol)
+            if sector:
+                return sector
+        except Exception as e:  # noqa: BLE001
+            log_event(logger, "data.sector_lookup_failed", logging.WARNING, error=safe_error(e))
+    return _sector(symbol)
+
+
+def _macro(db: Session | None) -> dict | None:
+    """Latest FRED value per series from the database; None without a session."""
+    if db is None:
+        return None
+    try:
+        with db.begin_nested():
+            series = research_store.macro_block(db)
+    except Exception as e:  # noqa: BLE001
+        log_event(logger, "data.macro_failed", logging.WARNING, error=safe_error(e))
+        return {"series": {}, "missing": ["macro"]}
+    return {"series": series, "missing": sorted(k for k, v in series.items() if v is None)}
 
 
 def _context_news(articles: list[dict], tickers: list[str], db: Session | None,
@@ -184,9 +220,9 @@ def build_context(tickers: list[str], *, db: Session | None = None,
                                        "last_trade_ts": None}
         entry = {
             **quote,
-            "sector": _sector(symbol),
+            "sector": _sector_for(symbol, db),
             "indicators": _technical_indicators(bars.get(symbol) or []),
-            "fundamentals": _fundamentals(symbol),
+            "fundamentals": _fundamentals(symbol, db),
             "news": news.get(symbol, []),
             **({} if news_ok else {"news_unavailable": True}),
         }
@@ -225,6 +261,7 @@ def build_context(tickers: list[str], *, db: Session | None = None,
             "coverage": market_data.coverage_note(),
         },
         "market_context": market_context.compute(bars, ctx_symbols),
+        **({"macro": macro} if (macro := _macro(db)) is not None else {}),
         "watchlist_data": market,
         "constraints": {
             "max_position_pct": float(settings.max_position_pct),

@@ -141,7 +141,13 @@ def test_partial_fill_capped_by_volume_and_fees():
 
 # ---- engine / risk sizing ------------------------------------------------------------------
 
-def test_entries_sized_through_risk_engine():
+def test_entries_sized_through_risk_engine(monkeypatch):
+    # Pin the risk limits this test asserts, so a developer's backend/.env can't change them.
+    from decimal import Decimal
+
+    from app.config import settings
+    monkeypatch.setattr(settings, "max_open_positions", 3)
+    monkeypatch.setattr(settings, "max_position_pct", Decimal("10"))
     days = weekdays(date(2025, 1, 2), 12)
     syms = ["A", "B", "C", "D", "E"]
     store = flat_store(syms, days)

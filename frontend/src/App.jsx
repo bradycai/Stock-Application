@@ -10,6 +10,9 @@ import ResearchPage from "./pages/ResearchPage";
 import JournalPage from "./pages/JournalPage";
 import UsagePage from "./pages/UsagePage";
 import SettingsPage from "./pages/SettingsPage";
+import PerformancePage from "./pages/PerformancePage";
+import ProposalsPage from "./pages/ProposalsPage";
+import EventsPage from "./pages/EventsPage";
 
 export default function App() {
   const [tab, setTab] = useState("dashboard");
@@ -106,8 +109,11 @@ export default function App() {
       {tab === "history" && <HistoryPage {...shared} />}
       {tab === "orders" && <OrdersPage {...shared} />}
       {tab === "research" && <ResearchPage />}
+      {tab === "proposals" && <ProposalsPage />}
+      {tab === "events" && <EventsPage />}
       {tab === "journal" && <JournalPage />}
       {tab === "usage" && <UsagePage />}
+      {tab === "performance" && <PerformancePage />}
       {tab === "settings" && <SettingsPage {...shared} />}
 
       <footer className="app-footer muted">

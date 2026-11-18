@@ -1,6 +1,15 @@
 import AutomationPanel from "../components/AutomationPanel";
+import { ops } from "../api/ops";
+import { usePolling } from "../components/ops/usePolling";
+import HealthSection from "../components/ops/HealthSection";
+import AlertsSection from "../components/ops/AlertsSection";
+import ErrorsSection from "../components/ops/ErrorsSection";
+import SpendHistorySection from "../components/ops/SpendHistorySection";
 
 export default function SettingsPage({ autoStatus, portfolio }) {
+  // One poll (30s, paused while hidden) feeds both the health and recent-errors sections.
+  const status = usePolling(() => ops.getStatus(), 30000);
+
   const rows = autoStatus
     ? [
         ["Trading mode", autoStatus.is_paper ? "PAPER" : "LIVE"],
@@ -16,6 +25,9 @@ export default function SettingsPage({ autoStatus, portfolio }) {
 
   return (
     <div className="page">
+      <HealthSection status={status} />
+      <AlertsSection />
+
       <AutomationPanel onChange={() => {}} />
 
       <div className="card">
@@ -43,6 +55,9 @@ export default function SettingsPage({ autoStatus, portfolio }) {
           <code> backend/.env</code> and are not editable from the UI by design.
         </p>
       </div>
+
+      <ErrorsSection status={status} />
+      <SpendHistorySection />
     </div>
   );
 }

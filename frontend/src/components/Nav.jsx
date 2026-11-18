@@ -4,10 +4,13 @@ const TABS = [
   { key: "monitor", label: "Monitor" },
   { key: "history", label: "Rejected / History" },
   { key: "research", label: "Research" },
+  { key: "proposals", label: "Proposals" },
+  { key: "events", label: "Events" },
   { key: "journal", label: "Journal" },
+  { key: "performance", label: "Performance" },
   { key: "usage", label: "Usage" },
   { key: "orders", label: "Orders" },
-  { key: "settings", label: "Settings" },
+  { key: "settings", label: "Operations" },
 ];
 
 export default function Nav({ active, onChange, badges = {} }) {

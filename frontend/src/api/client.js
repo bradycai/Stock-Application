@@ -1,7 +1,7 @@
 const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN = import.meta.env.VITE_API_TOKEN || "";
 
-async function request(path, options = {}) {
+export async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     ...options,
     headers: {
@@ -17,7 +17,9 @@ async function request(path, options = {}) {
     } catch {
       detail = res.statusText;
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    err.status = res.status;
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();

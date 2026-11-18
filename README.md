@@ -237,6 +237,11 @@ STRATEGIST_WORKER_ENABLED=true python -m app.workers.strategist_worker   # from 
   it waits for approval (or the automation gate).
 - Single instance, Opus cost ceilings (`STRATEGIST_*_BUDGET_USD`), heartbeats,
   `GET /proposals`, `GET /proposals/{id}`.
+- **Dashboard:** the **Proposals** tab shows each proposal with the Opus recommendation, every
+  specialist report, the cited evidence (with source links), conflicts, limitations, the
+  reason to abstain and any validation or risk violations, and lets you approve or reject a
+  pending intent (approval re-checks risk and submits a **paper** order). The **Events** tab
+  shows the watcher's health, its decision feed and the research job queue, refreshed every 15s.
 
 ## Backtesting
 
@@ -307,6 +312,12 @@ Deterministic, read-only over the trade journal (no broker calls), idempotent pe
   suggestions are stored as pending proposals and never change anything by themselves.
 - Read it at `GET /reviews`, `GET /reviews/{id}` and `GET /strategy-metrics`; record your
   decision on suggestions with `POST /reviews/{id}/decision`.
+- **Dashboard:** the **Performance** tab shows daily and weekly reviews (P&L, fees, slippage,
+  drawdown vs SPY, execution quality, missed ideas), strategy metrics with calibration and
+  low-sample flags, and backtest reports. Accepting or rejecting a review's suggestions only
+  records your decision. The **Operations** tab (formerly Settings) adds system health, alerts
+  and recent errors from the `/ops` API, and Claude spend history, next to the automation
+  controls. Sections whose API isn't on the server yet say so instead of showing an error.
 
 ## Adaptive risk policies
 

@@ -221,3 +221,23 @@ body {
   .mode-option { flex: 1; padding: 8px 6px; }
 }
 .mode-select ~ .auto-state { margin-top: 10px; }
+
+/* Research / Usage dashboards */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-scroll .table { min-width: 560px; }
+.row-click { cursor: pointer; }
+.row-click:hover { background: rgba(255, 255, 255, 0.04); }
+.row-selected { background: rgba(47, 129, 247, 0.12); }
+.row-stale td { background: rgba(210, 153, 34, 0.14); }
+.row-incomplete td { background: rgba(248, 81, 73, 0.14); }
+.flag { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; margin-right: 4px; }
+.flag-stale { background: var(--warn); color: #1a1200; }
+.flag-incomplete { background: var(--neg); color: #fff; }
+.flag-ok { color: var(--pos); }
+.json-view {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+  font-size: 11px; max-height: 360px; overflow: auto; white-space: pre;
+}
+.usage-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+@media (max-width: 700px) { .usage-cards { grid-template-columns: 1fr; } }
+.page-stack { display: flex; flex-direction: column; gap: 16px; }

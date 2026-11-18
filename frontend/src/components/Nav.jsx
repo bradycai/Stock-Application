@@ -3,6 +3,8 @@ const TABS = [
   { key: "recommendations", label: "Recommendations" },
   { key: "monitor", label: "Monitor" },
   { key: "history", label: "Rejected / History" },
+  { key: "research", label: "Research" },
+  { key: "usage", label: "Usage" },
   { key: "orders", label: "Orders" },
   { key: "settings", label: "Settings" },
 ];

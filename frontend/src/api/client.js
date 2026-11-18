@@ -58,4 +58,9 @@ export const api = {
   getMonitorStatus: () => request("/monitor/status"),
   getMonitorEvents: () => request("/monitor/events"),
   getManagedPositions: () => request("/monitor/positions"),
+  getResearchRuns: (limit = 20) => request(`/research/runs?limit=${limit}`),
+  getRunQuality: (id) => request(`/research/runs/${id}/quality`),
+  getSnapshot: (id) => request(`/analysis/snapshots/${id}`),
+  getLlmUsage: (days = 7) => request(`/llm/usage?days=${days}`),
+  getLlmCalls: (limit = 50) => request(`/llm/calls?limit=${limit}`),
 };

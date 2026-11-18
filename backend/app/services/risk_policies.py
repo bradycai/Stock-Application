@@ -38,6 +38,17 @@ def _f(value, default: float = 0.0) -> float:
     return out if math.isfinite(out) else default
 
 
+def _num(value) -> float | None:
+    """A finite float, or None when missing/malformed."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _floor4(x: float) -> float:
     return math.floor(x * 10_000) / 10_000
 
@@ -66,11 +77,14 @@ def evaluate_policies(
     positions: Sequence[Mapping],
     market: Mapping | None,
     sector_of: Callable[[str], str | None],
-    returns_by_symbol: Mapping[str, Sequence],
+    returns_by_symbol: Mapping[str, Sequence] | None,
     settings=default_settings,
 ) -> PolicyResult:
     """Evaluate the policies for a BUY intent. `market` carries last_price, atr_14 (price
-    units), avg_volume_20 (shares) and market_open (True/False/None)."""
+    units), avg_volume_20 (shares) and market_open (True/False/None). `positions` holds
+    market_value (or qty x current_price); callers append pending buys / open buy orders as
+    extra entries. `returns_by_symbol=None` means the bar query failed (fail closed when
+    there are holdings to compare against)."""
     size_in = _f(intent.get("position_size_percent"))
     if intent.get("action") != "buy":
         return PolicyResult(size_pct=size_in)
@@ -116,6 +130,8 @@ def evaluate_policies(
     price = _f(market.get("last_price")) or _f(intent.get("limit_price"))
     atr = _f(market.get("atr_14"))
     atr_high = _f(settings.atr_high_pct)
+    if not atr > 0:
+        notes.append("RISK_BUDGET: volatility unknown (ATR unavailable); no volatility adjustment")
     if atr > 0 and price > 0 and atr_high > 0:
         atr_pct = atr / price * 100.0
         if atr_pct > atr_high:
@@ -123,34 +139,65 @@ def evaluate_policies(
                 f"volatility ATR {atr_pct:.1f}% of price exceeds {atr_high}%")
 
     # Portfolio limits (exposure counted at current market value, % of equity).
-    values = {p.get("symbol"): abs(_f(p.get("market_value"))) for p in positions}
-    gross_pct = sum(values.values()) / equity * 100.0
+    holdings: list[tuple[str, float]] = []
+    unknown_exposure: list[str] = []
+    for p in positions:
+        sym = p.get("symbol")
+        mv = _num(p.get("market_value"))
+        qty, cur = _num(p.get("qty")), _num(p.get("current_price"))
+        if mv is None or (mv == 0 and qty):  # missing, or a suspicious zero for a held quantity
+            mv = qty * cur if qty is not None and cur is not None and cur > 0 else None
+        if mv is None:
+            unknown_exposure.append(str(sym))
+        else:
+            holdings.append((sym, abs(mv)))
+    if unknown_exposure:
+        violate("EXPOSURE_UNKNOWN", "Exposure of " + ", ".join(unknown_exposure)
+                + " cannot be determined (no market value or qty x price)")
+    held_symbols = list(dict.fromkeys(sym for sym, _ in holdings))
+    gross_pct = sum(v for _, v in holdings) / equity * 100.0
     cap(_f(settings.max_gross_exposure_pct) - gross_pct, "EXPOSURE_LIMIT",
         f"gross exposure {gross_pct:.1f}% of max {settings.max_gross_exposure_pct}%")
 
-    def bucket(sym: str) -> str:
-        sector = sector_of(sym)
-        return str(sector) if sector else f"UNKNOWN:{sym}"
+    # A lookup that RAISES is an error (fail closed); None is a genuinely unknown sector.
+    try:
+        sectors = {sym: sector_of(sym) for sym in dict.fromkeys([ticker, *held_symbols])}
+    except Exception as e:  # noqa: BLE001
+        sectors = None
+        violate("SECTOR_UNKNOWN", f"Sector lookup failed ({type(e).__name__}); cannot check concentration")
+    if sectors is not None:
+        def bucket(sym: str) -> str:
+            return str(sectors[sym]) if sectors[sym] else f"UNKNOWN:{sym}"
 
-    mine = bucket(ticker)
-    sector_pct = sum(v for s, v in values.items() if bucket(s) == mine) / equity * 100.0
-    cap(_f(settings.max_sector_exposure_pct) - sector_pct, "SECTOR_CONCENTRATION",
-        f"sector '{mine}' exposure {sector_pct:.1f}% of max {settings.max_sector_exposure_pct}%")
+        mine = bucket(ticker)
+        sector_pct = sum(v for s, v in holdings if bucket(s) == mine) / equity * 100.0
+        cap(_f(settings.max_sector_exposure_pct) - sector_pct, "SECTOR_CONCENTRATION",
+            f"sector '{mine}' exposure {sector_pct:.1f}% of max {settings.max_sector_exposure_pct}%")
 
-    candidate = returns_by_symbol.get(ticker)
-    if candidate:
-        threshold = _f(settings.correlation_threshold)
-        corr_hits = []
-        for sym in values:
-            if sym == ticker or sym not in returns_by_symbol:
-                continue
-            c = correlation(candidate, returns_by_symbol[sym], int(settings.correlation_min_obs))
-            if c is not None and c > threshold:
-                corr_hits.append(f"{sym} ({c:.2f})")
-        if len(corr_hits) >= int(settings.max_correlated_holdings):
-            violate("CORRELATED_HOLDINGS",
-                    f"{ticker} is correlated above {threshold} with {len(corr_hits)} holdings: "
-                    + ", ".join(corr_hits))
+    # Correlation must not fail open: with holdings to compare against, missing candidate
+    # history (or a failed bar query) rejects; holdings lacking history are noted.
+    others = [s for s in held_symbols if s != ticker]
+    if others:
+        min_obs = int(settings.correlation_min_obs)
+        candidate = (returns_by_symbol or {}).get(ticker) or []
+        if returns_by_symbol is None:
+            violate("CORRELATION_UNKNOWN", "Daily bars unavailable; cannot check correlation with holdings")
+        elif sum(1 for r in candidate if r is not None) < min_obs:
+            violate("CORRELATION_UNKNOWN",
+                    f"{ticker} has fewer than {min_obs} daily returns; cannot check correlation")
+        else:
+            threshold = _f(settings.correlation_threshold)
+            corr_hits = []
+            for sym in others:
+                c = correlation(candidate, returns_by_symbol.get(sym) or [], min_obs)
+                if c is None:
+                    notes.append(f"CORRELATION: {sym} has insufficient history; correlation not checked")
+                elif c > threshold:
+                    corr_hits.append(f"{sym} ({c:.2f})")
+            if len(corr_hits) >= int(settings.max_correlated_holdings):
+                violate("CORRELATED_HOLDINGS",
+                        f"{ticker} is correlated above {threshold} with {len(corr_hits)} holdings: "
+                        + ", ".join(corr_hits))
 
     # Liquidity. Unknown average volume fails closed.
     adv_usd = _f(market.get("avg_volume_20")) * price
@@ -169,7 +216,7 @@ def evaluate_policies(
 
 def apply(intent: dict, ri: "risk.RiskInput", result: "risk.RiskResult", *,
           positions: Sequence[Mapping], market: Mapping | None,
-          sector_of: Callable[[str], str | None], returns_by_symbol: Mapping[str, Sequence],
+          sector_of: Callable[[str], str | None], returns_by_symbol: Mapping[str, Sequence] | None,
           ) -> tuple["risk.RiskResult", list[str]]:
     """Layer the policies on a risk.evaluate result. Returns (result, notes).
 
@@ -189,3 +236,10 @@ def apply(intent: dict, ri: "risk.RiskInput", result: "risk.RiskResult", *,
         ri.intent = intent
         result = risk.evaluate(ri)
     return result, pr.notes
+
+
+def fail_closed(result: "risk.RiskResult", exc: Exception) -> tuple["risk.RiskResult", list[str]]:
+    """Result for an unexpected policy error: the intent is rejected with RISK_POLICY_ERROR."""
+    msg = f"Risk policies could not be evaluated ({type(exc).__name__}); failing closed"
+    return (risk.RiskResult(passed=False, violations=list(result.violations)
+                            + [risk.Violation("RISK_POLICY_ERROR", msg)]), [])

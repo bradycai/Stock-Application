@@ -30,12 +30,19 @@ def _intent(size=5.0, stop=5.0, action="buy", ticker="AAA", limit=100.0):
             "position_size_percent": size, "stop_loss_percent": stop, "take_profit_percent": 10}
 
 
-def _eval(intent=None, *, positions=(), market=LIQUID, sectors=None, returns=None, **overrides):
+_UNSET = object()
+
+
+def _eval(intent=None, *, positions=(), market=LIQUID, sectors=None, returns=_UNSET, sector_of=None,
+          **overrides):
     s = Settings(_env_file=None, **overrides)
     sectors = sectors or {}
+    if returns is _UNSET:  # independent, uncorrelated histories for everyone by default
+        returns = {sym: _series(i + 100) for i, sym in
+                   enumerate(["AAA", "X", "Y", "Z", "MSFT", *[p["symbol"] for p in positions]])}
     return evaluate_policies(intent or _intent(), account=ACCOUNT, positions=list(positions),
-                             market=market, sector_of=lambda sym: sectors.get(sym),
-                             returns_by_symbol=returns or {}, settings=s)
+                             market=market, sector_of=sector_of or (lambda sym: sectors.get(sym)),
+                             returns_by_symbol=returns, settings=s)
 
 
 def _pos(symbol, value):
@@ -114,9 +121,43 @@ def test_correlated_holdings_rejected():
     assert _codes(_eval(positions=pos, returns=returns)) == ["CORRELATED_HOLDINGS"]
     # Only one highly correlated holding -> allowed.
     assert _eval(positions=pos[:1] + pos[2:], returns=returns).violations == []
-    # Too few observations -> correlation ignored.
+    # Candidate with too few observations (holdings exist) -> fail closed.
     short = {k: v[:5] for k, v in returns.items()}
-    assert _eval(positions=pos, returns=short).violations == []
+    assert _codes(_eval(positions=pos, returns=short)) == ["CORRELATION_UNKNOWN"]
+    # Bar query failed -> fail closed; no holdings -> nothing to compare, allowed.
+    assert _codes(_eval(positions=pos, returns=None)) == ["CORRELATION_UNKNOWN"]
+    assert _eval(positions=[], returns=None).violations == []
+    # A holding without enough history is noted, not silently skipped.
+    partial = {k: v for k, v in returns.items() if k != "Z"}
+    res = _eval(positions=pos[2:], returns=partial)
+    assert res.violations == [] and any("Z" in n and "CORRELATION" in n for n in res.notes)
+
+
+def test_sector_lookup_error_fails_closed_but_unknown_is_fine():
+    def boom(sym):
+        raise RuntimeError("db down")
+    assert _codes(_eval(positions=[_pos("X", 1_000)], sector_of=boom)) == ["SECTOR_UNKNOWN"]
+    assert _eval(positions=[_pos("X", 1_000)], sector_of=lambda s: None).violations == []
+
+
+def test_exposure_falls_back_to_qty_times_price_then_fails_closed():
+    # market_value missing -> qty x current_price = 50k -> cap reached
+    res = _eval(positions=[{"symbol": "X", "qty": 500, "current_price": 100.0}])
+    assert _codes(res) == ["EXPOSURE_LIMIT"]
+    # malformed market_value falls back too; a zero value for a held qty is not trusted
+    res = _eval(positions=[{"symbol": "X", "market_value": "n/a", "qty": 500, "current_price": 100.0}])
+    assert _codes(res) == ["EXPOSURE_LIMIT"]
+    res = _eval(positions=[{"symbol": "X", "market_value": 0, "qty": 500, "current_price": 100.0}])
+    assert _codes(res) == ["EXPOSURE_LIMIT"]
+    # nothing usable -> EXPOSURE_UNKNOWN, never counted as zero
+    assert "EXPOSURE_UNKNOWN" in _codes(_eval(positions=[{"symbol": "X"}]))
+    assert "EXPOSURE_UNKNOWN" in _codes(_eval(positions=[{"symbol": "X", "market_value": None, "qty": 5}]))
+
+
+def test_unknown_volatility_is_a_note_only():
+    res = _eval(market={**LIQUID, "atr_14": None})
+    assert res.violations == [] and res.size_pct == 5.0
+    assert any("volatility unknown" in n for n in res.notes)
 
 
 def test_illiquid_rejected_and_adv_cap_reduces():
@@ -205,14 +246,14 @@ def test_property_policies_never_loosen_risk_evaluate():
 # --------------------------------------------------------------------------- #
 # Wiring: monitor                                                             #
 # --------------------------------------------------------------------------- #
-def _persist(positions=(), mdata=None, size=10, stop=20):
+def _persist(positions=(), mdata=None, size=10, stop=20, db=None):
     from app.schemas import MonitorDecision
     from app.services.triggers import Trigger
 
     decision = MonitorDecision(ticker="AAPL", action="buy", confidence=0.9, reason="breakout",
                                size_percent=size, stop_loss_percent=stop, take_profit_percent=30,
                                limit_price=100.0)
-    db = SimpleNamespace(add=lambda _: None, flush=lambda: None)
+    db = db or SimpleNamespace(add=lambda _: None, flush=lambda: None)
     account = {"equity": 100_000, "cash": 100_000, "day_pnl_pct": 0.0, "open_positions": len(positions)}
     md = mdata if mdata is not None else {
         "last_price": 100.0, "intraday_change_pct": 0.0,
@@ -244,6 +285,24 @@ def test_monitor_buy_without_volume_data_is_rejected_illiquid():
     assert "ILLIQUID" in {v["code"] for v in row.risk_violations}
 
 
+def test_monitor_policy_exception_rejects_that_intent_with_risk_policy_error(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("kaput")
+    monkeypatch.setattr(risk_policies, "apply", boom)
+    row = _persist()
+    assert row.status == IntentStatus.rejected_by_risk and row.computed_qty is None
+    assert "RISK_POLICY_ERROR" in {v["code"] for v in row.risk_violations}
+
+
+def test_monitor_records_policy_notes_in_the_audit_trail():
+    added = []
+    db = SimpleNamespace(add=added.append, flush=lambda: None)
+    row = _persist(db=db)  # 10% size, 20% stop -> reduced to 5%
+    audits = [a for a in added if isinstance(a, AuditLog) and a.event_type == "risk_policy_adjusted"]
+    assert row.position_size_percent == 5.0 and len(audits) == 1
+    assert any("RISK_BUDGET" in n for n in audits[0].payload["notes"])
+
+
 # --------------------------------------------------------------------------- #
 # Wiring: execution (database)                                                #
 # --------------------------------------------------------------------------- #
@@ -252,7 +311,7 @@ def exec_env(monkeypatch):
     gate = automation.evaluate_gate(mode="manual", kill_switch=False, capability_ok=True,
                                     capability_reason="ok")
     monkeypatch.setattr(automation, "order_gate", lambda db: gate)
-    env = SimpleNamespace(positions=[], submitted=[], market=dict(LIQUID))
+    env = SimpleNamespace(positions=[], submitted=[], market=dict(LIQUID), open_orders=[])
     now = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(broker, "get_account", lambda: {
         "equity": 100_000.0, "cash": 100_000.0, "buying_power": 100_000.0, "day_pnl_pct": 0.0,
@@ -264,6 +323,7 @@ def exec_env(monkeypatch):
                         lambda syms: {syms[0]: {"last_price": 100.0, "quote_ts": now, "last_trade_ts": now}})
     monkeypatch.setattr(market_data, "market_clock", lambda *a, **k: {"is_open": True})
     monkeypatch.setattr(risk_policy_data, "market_from_bars", lambda db, sym, price: env.market)
+    monkeypatch.setattr(broker, "list_open_orders", lambda: env.open_orders)
 
     def submit(intent, qty, client_order_id):
         env.submitted.append((qty, client_order_id))
@@ -370,3 +430,136 @@ def test_settings_defaults_are_conservative():
     s = Settings(_env_file=None)
     assert s.block_when_market_closed is False
     assert s.risk_per_trade_pct == Decimal("1.0") and s.max_gross_exposure_pct == Decimal("50")
+
+
+# --------------------------------------------------------------------------- #
+# Review fixes                                                                #
+# --------------------------------------------------------------------------- #
+def _add_open_buy_order(db, broker_order_id="b9", symbol="MSFT", limit=100.0):
+    from app.models import Order
+    anchor = _db_buy(db)
+    db.add(Order(intent_id=anchor.id, broker_order_id=broker_order_id, client_order_id="c-" + broker_order_id,
+                 symbol=symbol, side="buy", qty=600, order_type="limit", limit_price=limit, status="new",
+                 is_live=False))
+    db.flush()
+
+
+def test_execution_counts_open_broker_buy_orders_toward_exposure(pg_db, exec_env):
+    _add_open_buy_order(pg_db)  # 600 x $100 = 60% of equity, unfilled
+    exec_env.open_orders = [{"broker_order_id": "b9", "symbol": "MSFT", "side": "buy", "qty": 600},
+                            {"broker_order_id": "s1", "symbol": "AAPL", "side": "sell", "qty": 5}]
+    intent = _db_buy(pg_db)
+    with pytest.raises(execution.ExecutionError) as e:
+        execution.execute_intent(pg_db, intent, "user:operator")
+    assert "EXPOSURE_LIMIT" in {v["code"] for v in e.value.violations}
+    assert exec_env.submitted == []
+
+
+def test_execution_open_buy_order_with_unknown_price_fails_closed(pg_db, exec_env):
+    exec_env.open_orders = [{"broker_order_id": "nope", "symbol": "MSFT", "side": "buy", "qty": 10}]
+    intent = _db_buy(pg_db)
+    with pytest.raises(execution.ExecutionError) as e:
+        execution.execute_intent(pg_db, intent, "user:operator")
+    assert "EXPOSURE_UNKNOWN" in {v["code"] for v in e.value.violations}
+
+
+def test_execution_fails_closed_when_open_orders_cannot_be_listed(pg_db, exec_env, monkeypatch):
+    monkeypatch.setattr(broker, "list_open_orders", lambda: (_ for _ in ()).throw(RuntimeError("503")))
+    intent = _db_buy(pg_db)
+    with pytest.raises(execution.ExecutionError):
+        execution.execute_intent(pg_db, intent, "user:operator")
+    assert exec_env.submitted == [] and intent.status == IntentStatus.pending_approval
+
+
+def _bar(symbol, ts, volume=5_000_000.0):
+    from app.models import MarketBar
+    return MarketBar(symbol=symbol, timeframe="1Day", ts=ts, open=100, high=101, low=99, close=100,
+                     volume=volume, feed="iex")
+
+
+def test_stale_bars_are_treated_as_no_data(pg_db):
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    for i in range(25):
+        pg_db.add(_bar("OLD", now - timedelta(days=30 + i)))
+        pg_db.add(_bar("NEW", now - timedelta(days=i)))
+    pg_db.flush()
+    assert risk_policy_data.market_from_bars(pg_db, "OLD", 100.0).get("avg_volume_20") is None
+    assert risk_policy_data.market_from_bars(pg_db, "NEW", 100.0)["avg_volume_20"] == 5_000_000.0
+    assert risk_policy_data.returns_by_symbol(pg_db, ["OLD"])["OLD"] == []
+    # no data -> the liquidity policy rejects
+    res = _eval(market=risk_policy_data.market_from_bars(pg_db, "OLD", 100.0))
+    assert _codes(res) == ["ILLIQUID"]
+
+
+def test_bar_query_failure_yields_none_returns(pg_db, monkeypatch):
+    monkeypatch.setattr(risk_policy_data, "select", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    assert risk_policy_data.returns_by_symbol(pg_db, ["AAA"]) is None
+
+
+def test_open_buy_exposure_helper_ignores_sells():
+    out = risk_policy_data.open_buy_exposure(
+        SimpleNamespace(), [{"symbol": "A", "side": "OrderSide.BUY", "qty": 5, "broker_order_id": "x"},
+                            {"symbol": "B", "side": "sell", "qty": 5}])
+    assert out == [{"symbol": "A", "market_value": None}]  # non-Session db: price unknown -> fail closed
+
+
+def _analysis_env(monkeypatch, tickers, intents_kwargs=None):
+    from app.schemas import TradeIntent as ModelIntent
+    from app.services import batch, data_aggregator, prescreener
+
+    def model_intent(ticker):
+        return ModelIntent(ticker=ticker, action="buy", order_type="limit", limit_price=100.0,
+                           position_size_percent=10, stop_loss_percent=20, take_profit_percent=30,
+                           confidence=0.8, reason="r", risks="r", evidence=["rsi_14=55"])
+
+    entry = {"last_price": 100.0, "intraday_change_pct": 0.0, "sector": "Tech", "news": [],
+             "quality": {"stale": False, "incomplete": False, "missing": []},
+             "indicators": {"data_sufficient": True, "atr_14": 1.0, "avg_volume_20": 5_000_000}}
+    watch = {t: dict(entry) for t in tickers}
+    account = {"equity": 100_000.0, "cash": 100_000.0, "buying_power": 100_000.0, "day_pnl": 0.0,
+               "day_pnl_pct": 0.0, "is_paper": True, "raw": {}}
+    context = {"portfolio": {"open_positions": 0}, "positions": [], "market": {"open": True},
+               "watchlist_data": watch}
+    monkeypatch.setattr(data_aggregator, "build_context", lambda syms, **kw: (context, account))
+    monkeypatch.setattr(prescreener, "rank_candidates", lambda wd, n: [SimpleNamespace(symbol=s) for s in wd])
+    monkeypatch.setattr(batch, "run_batched", lambda *a, **k: (
+        [model_intent(t) for t in tickers], {"batches": 1, "failed_batches": 0}))
+    gate = automation.evaluate_gate(mode="manual", kill_switch=False, capability_ok=True,
+                                    capability_reason="ok")
+    monkeypatch.setattr(automation, "order_gate", lambda db: gate)
+    from app.routers import analysis
+    monkeypatch.setattr(analysis.risk_state, "is_halted", lambda db, acct: (False, None))
+    return analysis
+
+
+def test_analysis_pending_buys_count_toward_exposure(pg_db, monkeypatch):
+    from app.config import settings
+    from app.schemas import RunAnalysisRequest
+    analysis = _analysis_env(monkeypatch, ["AAA", "BBB", "CCC"])
+    monkeypatch.setattr(settings, "max_gross_exposure_pct", Decimal("7"))
+    monkeypatch.setattr(risk_policy_data, "returns_by_symbol", lambda db, syms: {
+        s: _series(i) for i, s in enumerate(syms)})
+    out = analysis._run(pg_db, RunAnalysisRequest(), ["AAA", "BBB", "CCC"], "analysis-test")
+    by = {i.ticker: i for i in out.intents}
+    assert by["AAA"].position_size_percent == 5.0 and by["AAA"].status == "pending_approval"
+    assert by["BBB"].position_size_percent == 2.0 and by["BBB"].status == "pending_approval"  # 7% - 5%
+    assert by["CCC"].status == "rejected_by_risk"  # 7% - 7% left: nothing allowed
+    assert "EXPOSURE_LIMIT" in {v.code for v in by["CCC"].risk_violations}
+
+
+def test_analysis_policy_exception_rejects_only_that_intent(pg_db, monkeypatch):
+    from app.schemas import RunAnalysisRequest
+    analysis = _analysis_env(monkeypatch, ["AAA", "BBB"])
+    real = risk_policies.apply
+
+    def flaky(intent, *a, **k):
+        if intent["ticker"] == "AAA":
+            raise RuntimeError("boom")
+        return real(intent, *a, **k)
+    monkeypatch.setattr(risk_policies, "apply", flaky)
+    out = analysis._run(pg_db, RunAnalysisRequest(), ["AAA", "BBB"], "analysis-test")
+    by = {i.ticker: i for i in out.intents}
+    assert by["AAA"].status == "rejected_by_risk"
+    assert "RISK_POLICY_ERROR" in {v.code for v in by["AAA"].risk_violations}
+    assert by["BBB"].status == "pending_approval"

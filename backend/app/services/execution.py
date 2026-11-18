@@ -199,9 +199,12 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
     #     them blocks the entry (fail closed).
     if intent.action.value == "buy":
         try:
-            policy_symbols = list(dict.fromkeys([intent.ticker] + [p["symbol"] for p in positions]))
+            # Open (unfilled) broker buy orders count toward exposure like held positions.
+            policy_positions = list(positions) + risk_policy_data.open_buy_exposure(
+                db, broker.list_open_orders())
+            policy_symbols = list(dict.fromkeys([intent.ticker] + [p["symbol"] for p in policy_positions]))
             result, policy_notes = risk_policies.apply(
-                intent_dict, ri, result, positions=positions,
+                intent_dict, ri, result, positions=policy_positions,
                 market=risk_policy_data.market_from_bars(db, intent.ticker, intent_dict["limit_price"]),
                 sector_of=risk_policy_data.sector_of(db),
                 returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))

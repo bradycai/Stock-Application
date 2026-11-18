@@ -782,12 +782,16 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
     res = risk.evaluate(ri)
     # Adaptive policies after the hard rules: may only shrink the size (re-evaluated by
     # risk.evaluate) or reject the entry.
-    policy_symbols = list(dict.fromkeys([symbol] + [p["symbol"] for p in positions]))
-    res, _policy_notes = risk_policies.apply(
-        intent_dict, ri, res, positions=positions,
-        market=risk_policy_data.market_from_indicators(mdata, market_open),
-        sector_of=risk_policy_data.sector_of(db, {symbol: (mdata or {}).get("sector")}),
-        returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))
+    try:
+        policy_symbols = list(dict.fromkeys([symbol] + [p["symbol"] for p in positions]))
+        res, policy_notes = risk_policies.apply(
+            intent_dict, ri, res, positions=positions,
+            market=risk_policy_data.market_from_indicators(mdata, market_open),
+            sector_of=risk_policy_data.sector_of(db, {symbol: (mdata or {}).get("sector")}),
+            returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))
+    except Exception as e:  # noqa: BLE001 - fail closed for this intent
+        log_event(logger, "risk_policy.error", logging.ERROR, ticker=symbol, error=safe_error(e))
+        res, policy_notes = risk_policies.fail_closed(res, e)
     size = float(intent_dict["position_size_percent"])
     passed = res.passed and not output_violations
     violations = output_violations + res.as_violation_dicts()
@@ -805,6 +809,9 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
     )
     db.add(row)
     db.flush()
+    if policy_notes:
+        audit(db, "risk_policy_adjusted", "monitor", intent_id=row.id,
+              payload={"ticker": symbol, "size_percent": size, "notes": policy_notes})
     return row
 
 

@@ -431,6 +431,7 @@ def entry_env(monkeypatch, pg_db):
 
     monkeypatch.setattr(broker, "get_account", get_account)
     monkeypatch.setattr(broker, "get_positions", lambda: [])
+    monkeypatch.setattr(broker, "list_open_orders", lambda: [])
     monkeypatch.setattr(broker, "get_quote_and_intraday",
                         lambda s: {"last_price": 100.0, "intraday_change_pct": 0.0})
     monkeypatch.setattr(broker, "submit_bracket_order", submit)

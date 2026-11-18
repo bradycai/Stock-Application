@@ -193,7 +193,7 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
     out_intents: list[TradeIntent] = []
 
     # Inputs for the adaptive risk policies (BUYs only; they can only shrink or reject).
-    positions_now = context["positions"]
+    positions_now = list(context["positions"])  # grows with each buy that passes this run
     buy_symbols = [i.ticker for i in merged if i.action == "buy"]
     policy_returns = risk_policy_data.returns_by_symbol(
         db, list(dict.fromkeys(buy_symbols + [p["symbol"] for p in positions_now]))) if buy_symbols else {}
@@ -221,13 +221,20 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
         result = risk.evaluate(ri)
         # Adaptive policies run after the hard rules: a reduced size is re-evaluated by
         # risk.evaluate (which recomputes qty); a policy violation rejects the intent.
-        result, policy_notes = risk_policies.apply(
-            intent_dict, ri, result, positions=positions_now,
-            market=risk_policy_data.market_from_indicators(market, market_open),
-            sector_of=policy_sector_of, returns_by_symbol=policy_returns)
+        try:
+            result, policy_notes = risk_policies.apply(
+                intent_dict, ri, result, positions=positions_now,
+                market=risk_policy_data.market_from_indicators(market, market_open),
+                sector_of=policy_sector_of, returns_by_symbol=policy_returns)
+        except Exception as e:  # noqa: BLE001 - fail closed for THIS intent, keep the run going
+            log_event(logger, "risk_policy.error", logging.ERROR, ticker=ti.ticker, error=safe_error(e))
+            result, policy_notes = risk_policies.fail_closed(result, e)
         final_size = float(intent_dict.get("position_size_percent") or 0)
         violations = output_violations + result.as_violation_dicts()
         passed = result.passed and not output_violations
+        if passed and ti.action == "buy" and result.computed_notional:
+            # Later intents in this run must see this pending buy in exposure/sector totals.
+            positions_now.append({"symbol": ti.ticker, "market_value": float(result.computed_notional)})
 
         row = TradeIntent(
             run_id=run.id,

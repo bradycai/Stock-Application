@@ -80,8 +80,8 @@ npm run dev                   # http://localhost:5173
   upgrade and downgrade cleanly and preserve data.
 - Claude output is untrusted until validated: structured outputs + Pydantic + the checks
   in `intent_validation.py` and `risk.py`. On any doubt, fail closed.
-- Small, focused PRs; one issue per branch named `agent/<issue>-<slug>`; never push to
-  `main` or `Production` directly.
+- `Production` is the default (trunk) branch. Small, focused PRs into it; one issue per
+  branch named `agent/<issue>-<slug>`; never push to `Production` directly.
 
 ## Definition of done
 

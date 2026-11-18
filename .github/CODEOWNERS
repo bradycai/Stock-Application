@@ -1,5 +1,5 @@
 # Files whose changes can affect money movement, data integrity, secrets or CI.
-# A main-branch ruleset with "Require review from Code Owners" makes these review-required.
+# A ruleset on the default branch (Production) with "Require review from Code Owners" makes these review-required.
 
 # Risk, execution and broker access
 /backend/app/services/risk.py          @bradycai

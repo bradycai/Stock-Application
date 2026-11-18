@@ -1,12 +1,12 @@
 ---
 name: implement-issue
-description: Implement one GitHub issue on a fresh branch from main, with tests, and open a draft PR.
+description: Implement one GitHub issue on a fresh branch from Production (the default branch), with tests, and open a draft PR.
 ---
 
 # Implement an issue
 
 1. Confirm there is no existing branch or open PR for the issue (`gh pr list --search`).
-2. Branch from the latest `main`: `agent/<issue>-<slug>`.
+2. Branch from the latest `Production` (the default branch): `agent/<issue>-<slug>`.
 3. Implement only the issue's scope. Follow `CLAUDE.md` safety boundaries.
 4. Add tests for new behavior and its failure paths. Run `ruff check app tests` and
    `pytest -q` (backend) and `npm run build` (frontend, if changed).

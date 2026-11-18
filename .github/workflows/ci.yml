@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, Production]
+    branches: [Production]
 
 # Least privilege: CI only reads the repository. No secrets are used anywhere in this
 # workflow — Claude and Alpaca are mocked in the test suite, and no step can place an order.

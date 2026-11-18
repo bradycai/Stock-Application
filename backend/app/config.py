@@ -206,6 +206,20 @@ class Settings(BaseSettings):
     retention_news_events_days: int = 0           # unreferenced news
     retention_research_jobs_days: int = 0         # finished jobs not referenced by a bundle/decision
 
+    # --- scheduler & recurring jobs ---
+    scheduler_enabled: bool = False               # the scheduler worker is opt-in
+    scheduler_tick_seconds: int = 30              # how often the worker checks what is due (min 5)
+    scheduler_stale_run_sec: int = 1800           # a `running` run older than this counts as crashed
+    scheduler_retry_delay_sec: int = 300          # wait before retrying a failed run
+    scheduler_max_attempts: int = 3               # retry ceiling per (job, period)
+    scanner_enabled: bool = False                 # candidate scanner (enqueues research jobs only)
+    scanner_interval_min: int = 30                # scan cadence during market hours (ET)
+    scanner_top_n: int = 5                        # jobs enqueued per scan
+    scanner_max_jobs_per_day: int = 10            # hard daily cap on scanner-enqueued jobs
+    scanner_universes: str = ""                   # comma-separated universe names; empty = all
+    briefing_llm_summary: bool = False            # optional Claude summary of the briefing digest
+    briefing_clip_chars: int = 200                # headline clip length passed to the model
+
     @property
     def is_live(self) -> bool:
         return self.trading_mode.lower() == "live"

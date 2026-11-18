@@ -696,3 +696,24 @@ class SystemAlert(Base):
         Index("uq_system_alerts_active", "kind", "key", unique=True,
               postgresql_where=text("status <> 'resolved'")),
     )
+
+
+# --- scheduled jobs (recurring jobs) ---
+class ScheduledJobRun(Base):
+    """One run of a recurring job for one period. Unique (job_name, period_key): the insert-or-skip
+    claim makes runs idempotent across workers and restarts."""
+    __tablename__ = "scheduled_job_runs"
+    __table_args__ = (
+        UniqueConstraint("job_name", "period_key", name="uq_scheduled_job_runs_period"),
+        Index("ix_scheduled_job_runs_job_started", "job_name", "started_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    job_name: Mapped[str] = mapped_column(String, nullable=False)
+    period_key: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)   # running|succeeded|failed|skipped
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[dict | None] = mapped_column(JSONB)
+    error: Mapped[str | None] = mapped_column(Text)

@@ -10,6 +10,7 @@ from app.config import settings
 from app.logging_config import configure_logging, log_event, safe_error
 from app.routers import analysis, automation, intents, journal, orders, portfolio
 from app.routers import backtests as backtests_router
+from app.routers import briefings as briefings_router
 from app.routers import ops as ops_router
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
@@ -99,3 +100,4 @@ app.include_router(usage_router.router)
 app.include_router(watcher_router.router)
 app.include_router(backtests_router.router)
 app.include_router(ops_router.router)
+app.include_router(briefings_router.router)

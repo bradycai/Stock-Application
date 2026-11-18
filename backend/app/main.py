@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.database import Base, engine, run_migrations
+from app import db_migrate
 from app.routers import analysis, automation, intents, orders, portfolio
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
@@ -23,9 +23,14 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_startup():
-    # Create tables (and PG enums) if missing, then apply additive column migrations.
-    Base.metadata.create_all(bind=engine)
-    run_migrations()
+    # The app never changes the schema at startup. Refuse to start against a database that
+    # is not at the latest Alembic revision; run `python -m app.db_migrate` (after a backup).
+    status = db_migrate.schema_status()
+    if not status["up_to_date"]:
+        raise RuntimeError(
+            f"Database schema is at revision {status['current']!r} but the code expects "
+            f"{status['head']!r}. Back up the database, then run: python -m app.db_migrate"
+        )
     # Background position monitor. It is a no-op while automation is inactive (default).
     monitor.start()
 

@@ -3,6 +3,9 @@
 #   docker compose up -d --build              # postgres, migrate, api, frontend
 #   docker compose --profile workers up -d    # opt in to the background workers
 #
+# Postgres is published on 127.0.0.1:${POSTGRES_HOST_PORT:-5433} (not 5432, so it cannot clash with a
+# local Postgres); containers still reach it as postgres:5432.
+#
 # Secrets (Alpaca, Anthropic, API token, ...) come ONLY from backend/.env at runtime; nothing is
 # baked into an image. Everything binds to 127.0.0.1. TRADING_MODE is pinned to paper here.
 # Back up the database before the first migrate against real data (see CLAUDE.md).
@@ -35,7 +38,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U trading -d trading_assistant"]
       interval: 5s

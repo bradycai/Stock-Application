@@ -70,12 +70,13 @@ def llm_spend_today(db: Session, now: datetime) -> dict[str, float]:
     return {r: float(rows.get(r) or 0.0) for r in set(ROLES) | set(rows)}
 
 
-def order_failures(db: Session, since: datetime) -> int:
+def order_failures(db: Session, since: datetime) -> tuple[int, int]:
+    """(order rows rejected/failed, submit errors audited as `order_error`) since `since`."""
     rejected = db.scalar(select(func.count()).select_from(Order).where(
         Order.status.in_(ORDER_FAILURE_STATUSES), Order.submitted_at >= since)) or 0
     errors = db.scalar(select(func.count()).select_from(AuditLog).where(
         AuditLog.event_type == "order_error", AuditLog.ts >= since)) or 0
-    return int(rejected) + int(errors)
+    return int(rejected), int(errors)
 
 
 def reconcile_mismatches(db: Session, since: datetime) -> dict[str, int]:
@@ -120,9 +121,9 @@ def run_checks(db: Session, now: datetime) -> tuple[list[health.Finding], set[st
                                         f["latest_bar_age_sec"], s.ops_market_data_stale_sec)
 
     def orders_():
+        rows, errors = order_failures(db, health.window_start(now, s.ops_order_failure_window_min))
         return health.check_order_failures(
-            order_failures(db, health.window_start(now, s.ops_order_failure_window_min)),
-            s.ops_order_failure_window_min, s.ops_order_failure_threshold)
+            rows, errors, s.ops_order_failure_window_min, s.ops_order_failure_threshold)
 
     def budgets():
         spend = llm_spend_today(db, now)

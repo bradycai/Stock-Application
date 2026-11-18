@@ -77,12 +77,17 @@ def check_market_data(market_open: bool | None, quote_age_sec: float | None, bar
                      "stale_after_sec": stale_sec})]
 
 
-def check_order_failures(failures: int, window_min: int, threshold: int) -> list[Finding]:
+def check_order_failures(order_rows: int, submit_errors: int, window_min: int,
+                         threshold: int) -> list[Finding]:
+    """`order_rows`: orders the broker rejected/failed; `submit_errors`: submissions that failed
+    before an order row existed (audit `order_error`). Alerts on their sum."""
+    failures = order_rows + submit_errors
     if failures < max(1, threshold):
         return []
     return [Finding("order_failures", "orders", "critical",
                     f"{failures} order rejects/failures in the last {window_min} min",
-                    {"failures": failures, "window_min": window_min, "threshold": threshold})]
+                    {"failures": failures, "order_rows": order_rows, "submit_errors": submit_errors,
+                     "window_min": window_min, "threshold": threshold})]
 
 
 def check_llm_budgets(roles: dict[str, tuple[float, float | None]], pct: float) -> list[Finding]:

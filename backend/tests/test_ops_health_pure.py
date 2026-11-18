@@ -39,11 +39,14 @@ def test_market_data(open_, quote, bar, stale):
     assert bool(health.check_market_data(open_, quote, bar, 300)) is stale
 
 
-@pytest.mark.parametrize("n,fires", [(0, False), (2, False), (3, True), (10, True)])
-def test_order_failures(n, fires):
-    out = health.check_order_failures(n, 60, 3)
+@pytest.mark.parametrize("rows,errs,fires", [(0, 0, False), (2, 0, False), (3, 0, True), (0, 3, True),
+                                             (1, 2, True), (1, 1, False)])
+def test_order_failures(rows, errs, fires):
+    out = health.check_order_failures(rows, errs, 60, 3)
     assert bool(out) is fires
     assert all(f.severity == "critical" for f in out)
+    if out:
+        assert out[0].details["order_rows"] == rows and out[0].details["submit_errors"] == errs
 
 
 @pytest.mark.parametrize("spend,budget,pct,expect", [

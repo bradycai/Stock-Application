@@ -156,6 +156,18 @@ def test_cycle_flags_order_failures_budget_reconcile_and_backlog(pg_db, factory,
     assert {"order_failures", "llm_budget", "reconcile_mismatch", "research_backlog"} <= kinds
 
 
+def test_submit_errors_alone_raise_order_failure_alert(pg_db, factory):
+    for _ in range(3):  # execution.py audits order_error and creates no orders row
+        pg_db.add(AuditLog(event_type="order_error", actor="system", payload={"error": "x"},
+                           ts=NOW - timedelta(minutes=5)))
+    pg_db.add(AuditLog(event_type="order_error", actor="system", payload={}, ts=NOW - timedelta(hours=3)))
+    pg_db.commit()
+    _watcher(factory).run_cycle()
+    pg_db.expire_all()
+    a = pg_db.scalars(select(SystemAlert).where(SystemAlert.kind == "order_failures")).one()
+    assert a.details["submit_errors"] == 3 and a.details["order_rows"] == 0  # old one is outside the window
+
+
 # --------------------------------------------------------------------------- API
 def test_status_empty_database(client):
     body = client.get("/ops/status").json()

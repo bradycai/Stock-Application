@@ -36,6 +36,24 @@ def _clip(value) -> str:
     return s if len(s) <= MAX_VALUE_CHARS else s[:MAX_VALUE_CHARS] + "...[truncated]"
 
 
+TEXT_LIMITS = {"summary": 600, "invalidation": 300}
+LIST_ITEM_LIMIT = 300
+LIST_MAX_ITEMS = 12
+
+
+def _clip_report(report: dict) -> dict:
+    """Analyst reports are model output built from untrusted data: bound every text field."""
+    out = {}
+    for k, v in (report or {}).items():
+        if isinstance(v, str):
+            out[k] = v[:TEXT_LIMITS.get(k, 200)]
+        elif isinstance(v, list):
+            out[k] = [str(x)[:LIST_ITEM_LIMIT] for x in v[:LIST_MAX_ITEMS]]
+        else:
+            out[k] = v
+    return out
+
+
 def conflicts(reports: list[dict]) -> list[dict]:
     """Explicit stance conflicts among successful reports: every bullish-vs-bearish pair."""
     bulls = [r for r in reports if r.get("stance") == "bullish"]
@@ -87,10 +105,11 @@ def build_user_message(bundle: ResearchBundle, report_rows: list[AnalystReportRo
     """Returns (message, info) where info lists which reports were used / unavailable."""
     ok = [r for r in report_rows if r.status == "ok" and r.report]
     bad = [r for r in report_rows if not (r.status == "ok" and r.report)]
-    ok_reports = [r.report for r in ok]
+    ok_reports = [_clip_report(r.report) for r in ok]
     conf = conflicts(ok_reports)
-    evidence = {k: {"kind": v.get("kind"), "value": _clip(v.get("value")), "as_of": v.get("as_of"),
-                    "source": v.get("source")} for k, v in (bundle.evidence or {}).items()}
+    evidence = {k[:80]: {"kind": str(v.get("kind"))[:20], "value": _clip(v.get("value")),
+                         "as_of": str(v.get("as_of"))[:40], "source": str(v.get("source"))[:40]}
+                for k, v in (bundle.evidence or {}).items()}
     payload = {
         "reports": ok_reports,
         "analysts_unavailable": [{"analyst": r.analyst, "status": r.status,

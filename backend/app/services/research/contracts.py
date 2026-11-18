@@ -30,7 +30,9 @@ ANALYSTS = ("technical", "news", "fundamental", "market_regime", "institutional"
 BUNDLE_STATUSES = ("collecting", "ready", "strategized", "failed", "expired")
 PROPOSAL_STATUSES = ("proposed", "converted", "rejected", "abstained", "expired")
 
-_STRICT = ConfigDict(extra="forbid")
+# allow_inf_nan=False: Infinity/NaN are never valid prices or scores, and PostgreSQL JSONB can't
+# store them — a model emitting one must fail validation, not crash the write later.
+_STRICT = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
 class EvidenceItem(BaseModel):

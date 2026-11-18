@@ -3,6 +3,7 @@
 Statuses returned: "abstained" (HOLD/WATCH/AVOID or a non-empty abstain_reason, never a trade),
 "rejected" (any violation), "accepted" (clean BUY/SELL; position size clamped to the cap).
 """
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -82,6 +83,9 @@ def quote_from_evidence(evidence: dict, symbol: str) -> tuple[float | None, date
     return price, _parse_ts(item.get("as_of"))
 
 
+FUTURE_SKEW_SEC = 60  # tolerated clock skew before a quote counts as "from the future"
+
+
 def validate(p: StrategistProposal, bundle: BundleView, *, now: datetime, max_data_age_sec: float,
              max_limit_deviation_pct: float, max_position_pct: float) -> ValidationResult:
     now = _utc(now)
@@ -117,6 +121,16 @@ def validate(p: StrategistProposal, bundle: BundleView, *, now: datetime, max_da
     age = (now - ref_ts).total_seconds()
     if age > max_data_age_sec:
         v.append(_v("STALE_BUNDLE", f"bundle data is {age:.0f}s old (max {max_data_age_sec:.0f}s)"))
+    elif age < -FUTURE_SKEW_SEC:
+        v.append(_v("QUOTE_IN_FUTURE", f"quote is timestamped {-age:.0f}s in the future"))
+
+    numbers = {"entry_low": p.entry_low, "entry_high": p.entry_high, "confidence": p.confidence,
+               "invalidation_price": p.invalidation_price, "take_profit_price": p.take_profit_price,
+               "position_size_percent": p.position_size_percent}
+    bad = sorted(k for k, x in numbers.items() if not math.isfinite(float(x)))
+    if bad:
+        v.append(_v("NON_FINITE_NUMBER", f"non-finite values: {', '.join(bad)}"))
+        return res
 
     if price is None:
         v.append(_v("NO_QUOTE", f"bundle has no usable quote:{bundle.symbol} evidence"))

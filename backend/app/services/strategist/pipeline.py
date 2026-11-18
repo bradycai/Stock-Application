@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.deps import audit
 from app.logging_config import log_event, safe_error
-from app.models import AnalystReportRow, ResearchBundle, StrategyProposal
+from app.models import AnalystReportRow, IntentStatus, ResearchBundle, StrategyProposal, TradeIntent
 from app.services import llm, risk_state
 from app.services.research.contracts import StrategistProposal
 from app.services.strategist import STRATEGY_ID, budget, convert, prompt, validate
@@ -96,6 +96,21 @@ def process_bundle(db: Session, bundle: ResearchBundle, *, call_fn=None, get_acc
                     "reports_unavailable": info["reports_unavailable"]})
     db.add(row)
     db.flush()
+    # Persist the (paid-for) proposal now, so a later failure can't roll it back.
+    audit(db, "strategist.proposal_received", ACTOR,
+          payload={"proposal_id": row.id, "bundle_id": bundle.id})
+    db.commit()
+
+    duplicate = vres.status == "accepted" and db.scalar(
+        select(TradeIntent.id).where(TradeIntent.strategy_id == STRATEGY_ID,
+                                     TradeIntent.ticker == bundle.symbol,
+                                     TradeIntent.status == IntentStatus.pending_approval,
+                                     TradeIntent.expires_at > now).limit(1))
+    if duplicate:
+        vres.status = "rejected"
+        vres.violations.append({"code": "DUPLICATE_PENDING",
+                                "message": f"intent {duplicate} for {bundle.symbol} is already pending"})
+        row.validation = {**row.validation, "violations": vres.violations}
 
     if vres.status == "abstained":
         row.status = "abstained"

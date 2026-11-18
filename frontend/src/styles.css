@@ -251,3 +251,25 @@ body {
 .sample-low { color: var(--warn); font-weight: 600; }
 .journal-ids { white-space: nowrap; font-size: 11px; color: var(--muted); }
 .journal-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+
+/* --- proposals & events --- */
+.pe-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pe-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 8px; }
+.pe-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.pe-h3 { font-size: 14px; margin: 16px 0 6px; }
+.pe-h4 { font-size: 12px; margin: 8px 0 4px; color: var(--muted); text-transform: uppercase; }
+.pe-list { margin: 0; padding-left: 18px; }
+.pe-code { font-size: 11px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+.pe-detail { overflow-wrap: anywhere; }
+.pe-report { border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+.pe-report-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pe-approval { border: 1px solid var(--border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pe-status { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: var(--border); }
+.pe-status-converted { background: #1f3a5f; color: #9ecbff; }
+.pe-status-proposed { background: var(--warn); color: #1a1200; }
+.pe-status-rejected { background: var(--neg); color: #fff; }
+.pe-stance { font-size: 11px; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: var(--border); }
+.pe-stance-bullish { color: var(--pos); }
+.pe-stance-bearish { color: var(--neg); }
+.pe-urgency-high { color: var(--neg); font-weight: 700; }
+.pe-urgency-medium { color: var(--warn); font-weight: 600; }

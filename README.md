@@ -261,6 +261,31 @@ python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 202
   ratio, win rate, average win/loss, expectancy, trades, turnover, exposure, a bootstrap
   95% interval for the mean trade return, and a breakdown by market regime.
 
+### Replaying AI strategies and checking paper fills
+
+```bash
+python -m app.backtest.ai_run --start 2026-09-01 --end 2026-11-14 --split holdout --out reports/ai.json
+python -m app.backtest.paper_report --start 2026-09-01 --end 2026-11-14 --out reports/paper.json
+python -m app.backtest.run ... --created-at 2026-11-17T00:00:00Z --out reports/baseline.json
+```
+
+- **AI replay** re-runs every recorded strategist proposal (and other AI intents) through the
+  real proposal validation and the pure risk engine, then simulates the limit entry, stop,
+  target and horizon with the same fill model as the baseline. Results are grouped by
+  strategy, model and prompt version and compared with the momentum baseline and SPY over
+  the same dates, with calibration (stated confidence vs hit rate) and low-sample flags.
+- **No look-ahead:** entries and exits only use bars strictly after the decision's (UTC)
+  date. **No Claude calls:** recorded outputs are served from a cache keyed by role, model,
+  prompt version and bundle; a miss is skipped and listed, never sent to the API.
+- **Paper experiment report:** for each paper order, compares what the fill model predicted
+  (fill or not, price, slippage) with the actual fill and latency, and reports the fill-rate
+  difference and slippage bias. Read-only.
+- Reports are written to `BACKTEST_REPORT_DIR` (default `backend/reports/`, gitignored) and
+  served read-only at `GET /backtests/reports` and `GET /backtests/reports/{name}`; the
+  dashboard's Performance tab lists them.
+- Limitations: long-only, daily bars, one limit order per decision on the next session, and
+  independent positions (not a shared portfolio).
+
 ## Daily review and strategy metrics
 
 ```bash

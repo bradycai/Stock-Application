@@ -1,7 +1,7 @@
 const BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TOKEN = import.meta.env.VITE_API_TOKEN || "";
 
-async function request(path, options = {}) {
+export async function request(path, options = {}) {
   const res = await fetch(`${BASE}${path}`, {
     ...options,
     headers: {
@@ -17,7 +17,9 @@ async function request(path, options = {}) {
     } catch {
       detail = res.statusText;
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    err.status = res.status;
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
@@ -46,11 +48,24 @@ export const api = {
   haltTrading: () => request("/risk/halt", { method: "POST" }),
   resumeTrading: () => request("/risk/resume", { method: "POST" }),
   getAutomationStatus: () => request("/automation/status"),
-  enableAutomation: () => request("/automation/enable", { method: "POST" }),
-  disableAutomation: () => request("/automation/disable", { method: "POST" }),
+  setAutomationMode: (mode) =>
+    request("/automation/mode", { method: "POST", body: JSON.stringify({ mode }) }),
+  setKillSwitch: (engaged, reason) =>
+    request("/automation/kill-switch", {
+      method: "POST",
+      body: JSON.stringify({ engaged, reason: reason || null }),
+    }),
   getAutomationEvents: () => request("/automation/events"),
   clearAutomationEvents: () => request("/automation/events/clear", { method: "POST" }),
   getMonitorStatus: () => request("/monitor/status"),
   getMonitorEvents: () => request("/monitor/events"),
   getManagedPositions: () => request("/monitor/positions"),
+  getResearchRuns: (limit = 20) => request(`/research/runs?limit=${limit}`),
+  getRunQuality: (id) => request(`/research/runs/${id}/quality`),
+  getSnapshot: (id) => request(`/analysis/snapshots/${id}`),
+  getLlmUsage: (days = 7) => request(`/llm/usage?days=${days}`),
+  getJournalTrades: (limit = 200) => request(`/journal/trades?limit=${limit}`),
+  getJournalCandidates: () => request("/journal/candidates"),
+  syncJournal: () => request("/journal/sync", { method: "POST" }),
+  getLlmCalls: (limit = 50) => request(`/llm/calls?limit=${limit}`),
 };

@@ -1,10 +1,16 @@
 # AI Trading Assistant
 
+[![CI](https://github.com/bradycai/Stock-Application/actions/workflows/ci.yml/badge.svg?branch=Production)](https://github.com/bradycai/Stock-Application/actions/workflows/ci.yml)
+
 A full-stack trading assistant that connects Claude to an Alpaca brokerage account
 through a controlled backend. **Claude never places trades.** It analyzes market data
 and returns structured JSON trade *intents*. A deterministic risk engine validates every
-intent, a human approves each one, and only then does the backend submit an order to
-Alpaca.
+intent, a human approves each one (unless automation is explicitly set to Auto), and only
+then does the backend submit an order to Alpaca.
+
+> This is an engineering project, not a promise of profitability or a recommendation to
+> trade real money. Keep `TRADING_MODE=paper` until the system has been independently
+> validated.
 
 ```
 React dashboard ──▶ FastAPI backend ──▶ Alpaca (paper → live)
@@ -16,12 +22,429 @@ React dashboard ──▶ FastAPI backend ──▶ Alpaca (paper → live)
 ## Safety model
 
 - Claude has **no broker credentials and no order tool** — it physically cannot trade.
-- Every intent is **schema-validated** (structured output), then **risk-validated**
-  server-side, then **manually approved** by a human before an order is sent.
+- Every Claude request goes through one client (`services/llm.py`) that uses **structured
+  outputs**, validates the response again with Pydantic, and **fails closed** on refusals,
+  truncated responses, API errors or invalid output.
+- Every intent is then checked for stale data, an off-market limit price and missing
+  evidence, **risk-validated** server-side, and **manually approved** by a human before an
+  order is sent (unless automation is explicitly set to Auto — see below).
 - Risk runs **twice**: when Claude recommends, and again at approval (state may drift).
-- Orders are **bracket orders** — the stop loss is attached atomically with the entry.
-- A **daily-loss kill switch** halts all trading at −10% on the day.
+  Intents older than `INTENT_MAX_AGE_MIN` can't be approved.
+- Buy orders are limit entries with an attached stop loss (Alpaca OTO); exits are managed
+  by the monitor's trailing stop and partial profit-taking.
+- A **daily-loss circuit breaker** halts trading at −10% on the day, and a persistent
+  **kill switch** blocks all automated orders and new buys until released.
 - `client_order_id` makes order submission idempotent (no double submits on retry).
+
+## Automation modes
+
+Set from the dashboard (Settings → Automation):
+
+| Mode | What happens |
+|------|--------------|
+| **Manual** (default) | Nothing is automated. Every intent waits for your approval. |
+| **Observe** | Automation runs its decision logic and records `observe_would_execute` events, but places no orders. |
+| **Auto** | Eligible high-confidence intents execute, after the risk engine. Needs `AUTO_TRADING_ENABLED=true` on the server (plus `AUTO_LIVE_TRADING_CONFIRMATION` when live). |
+
+The **kill switch** overrides every mode, persists until released, and drops the mode to
+Manual. Manual sells and broker-side stop orders still work while it is engaged.
+
+## Models
+
+Each layer has its own model and effort level (`backend/.env`):
+
+| Layer | Default | Used for |
+|-------|---------|----------|
+| Strategist | `claude-opus-5-5`, effort `high` | Trade analysis |
+| Position | strategist model, effort `medium` | Continuous-monitor and open-position decisions |
+| Research | `claude-sonnet-5-5`, effort `medium` | Specialist analysts (later phases) |
+| Watcher | `claude-haiku-5-5`, effort `low` | High-frequency market watcher (later phases) |
+
+Every request is logged and written to the `llm_calls` table with tokens, estimated cost,
+model, prompt version and outcome.
+
+## Roadmap and status
+
+The app is evolving into a continuously running research system: Alpaca and research
+feeds → Haiku watcher → specialist analysts → Opus strategist → Python risk validation →
+Alpaca execution → trade journal and evaluation. Execution stays under deterministic
+control, and trading stays on paper until the system has been independently validated.
+
+| PR | Deliverable | Status |
+|----|-------------|--------|
+| 00 | GitHub protections, Dependabot, CI and Claude Code workflow | Done (in review) |
+| 01 | Startup, model routing, logging, schema validation, migrations (Phase 1) | Done (in review) |
+| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | Done (in review) |
+| 03 | Journal schema and decision/outcome tracking; SEC EDGAR + FRED research data | Done (in review) |
+| 04 | Haiku watcher skill, worker, jobs, budget and heartbeats; WebSocket streaming | Done (in review) |
+| 05 | News, technical, fundamentals, macro and institutional analysts | Done (in review) |
+| 06 | Opus strategy orchestration and enriched research UI | Done (in review) |
+| 07 | Adaptive risk policies, broker reconciliation and controls | Done (in review) |
+| 08 | Historical replay, evaluation and paper experiment reports | Done (in review) |
+| 09 | Daily review, weekly optimization and automation dashboards | Done (in review) |
+| 10 | Deployment, observability, recovery and final paper review | Done (in review); the final paper review needs a live observe-mode run |
+
+The first milestone is PRs 01–04: a safe, continuously running watcher that records
+evidence and triggers research jobs, with automated execution kept off while signal
+quality and cost are evaluated.
+
+## Market data layer
+
+- **Batched requests:** quotes, daily bars and news come from multi-symbol Alpaca requests
+  (`DATA_CHUNK_SIZE` symbols each, at most `DATA_MAX_CONCURRENCY` in parallel). A failed
+  batch is retried symbol by symbol, so one bad ticker can't blank the others. Daily bars
+  are cached for `BARS_CACHE_TTL_SEC`.
+- **Quality flags before the model:** every symbol gets `stale` (quote older than
+  `MAX_QUOTE_AGE_SEC` while the market is open), `incomplete` (no price or history) and a
+  `missing` list (unavailable fields are labeled, never guessed). Buy/sell intents for a
+  stale or incomplete symbol are rejected.
+- **Replayable snapshots:** each analysis run stores the exact context the model saw, with
+  its quality flags, feed and market state, in `market_snapshots`
+  (`GET /analysis/snapshots/{id}`); `analysis_runs.market_snapshot_id` links the run to it.
+- **History:** daily bars (`market_bars`), latest quotes (`latest_quotes`) and news
+  (`news_events`) are stored. News is deduplicated across sources and symbols, marked
+  `is_new` the first time it is seen, classified by event type, and shown to the model as
+  citable `news:<id>` items.
+- **Market context:** index trends, sector breadth, sector leaders/laggards and realized
+  volatility from index and sector ETFs (`MARKET_CONTEXT_SYMBOLS`).
+- **Coverage:** the free IEX feed carries only part of US volume; the feed in use is
+  recorded with every snapshot.
+- **Streaming worker:** `python -m app.workers.market_stream` (from `backend/`, separate from
+  the web server) subscribes to Alpaca quotes, minute bars and news over WebSockets for the
+  watchlist and open positions, buffers writes into `latest_quotes`, `market_bars` (1Min) and
+  `news_events`, refills missed minute bars from REST every `STREAM_REFILL_SEC`, logs a
+  heartbeat, and shuts down cleanly on Ctrl-C. It only reads market data and positions; it
+  never places orders. Free Alpaca plans allow one market-data WebSocket at a time.
+
+## Research data
+
+Fundamentals, filings and macro data are fetched by a separate refresh command, never inside a
+web request, and stored with their period, filing (release) date and source:
+
+```bash
+python -m app.services.research_data.refresh --symbols AAPL,MSFT,NVDA
+```
+
+- **SEC EDGAR** (needs `SEC_USER_AGENT`): ticker → CIK, company SIC code mapped to a sector
+  (replacing the old 27-symbol table), recent 8-K/10-Q/10-K filings, and XBRL facts (revenue,
+  net income, diluted EPS, gross profit, operating income). Rate-limited to 5 requests/second.
+- **FRED** (needs `FRED_API_KEY`): 10-year and 2-year Treasury yields, fed funds, CPI,
+  unemployment and VIX, keeping each vintage for point-in-time backtests.
+- The model context reads only stored values: latest fundamentals and growth with their
+  dates, the sector, the last filing, and a `macro` block. Anything unavailable stays null
+  and is listed as missing.
+
+## Market watcher
+
+The first milestone of the roadmap: a continuously running, cheap triage layer.
+
+```bash
+WATCHER_ENABLED=true python -m app.workers.market_watcher    # from backend/, separate process
+```
+
+- **One instance** (PostgreSQL advisory lock), one cycle every `WATCHER_INTERVAL_SECONDS` while
+  the market is open; outside the session it sleeps and makes no Claude calls.
+- **Deterministic first:** each cycle compares every watchlist/position symbol with its last
+  observation (new news, volume spike, breakout/breakdown, large move, position or regime
+  change) and records each signal in `signal_events`. Unchanged symbols never reach Claude.
+- **Haiku triage:** changed symbols go in small batches to `claude-haiku-5-5` (low effort)
+  with `backend/skills/market-watcher/SKILL.md` as its instructions. It answers IGNORE, WATCH,
+  INVESTIGATE, REVIEW_POSITION or ALERT with evidence ids; a decision citing an unknown symbol
+  or evidence is downgraded to IGNORE. Decisions go to `watcher_decisions`, with per-symbol
+  cooldowns.
+- **Jobs:** INVESTIGATE and REVIEW_POSITION are queued in `research_jobs` (unique keys, leases,
+  bounded retries) for the research analysts of the next phase. ALERT is logged and audited.
+- **Budget:** daily and monthly estimated-cost ceilings (`WATCHER_*_BUDGET_USD`) from the
+  `llm_calls` ledger; over budget, the cycle skips Claude and says so in its heartbeat.
+- **Observability:** `worker_heartbeats`, and `GET /watcher/status`, `/watcher/decisions`,
+  `/watcher/jobs`. The watcher never calls an order endpoint.
+
+## Trade journal
+
+Every proposal, order and outcome is linked so results can be measured, including losses
+and ideas that were rejected or never traded:
+
+- Intents record their strategy (`claude-analysis` or `continuous-monitor`), prompt version,
+  the evidence the model cited, the market snapshot they came from, and an expiry.
+- A read-only order sync (every monitor cycle, in every mode, and `POST /journal/sync`) pulls
+  order status and fills from Alpaca into `order_fills`, opens a `trade_outcomes` row when a
+  buy fills and closes it when the position's sell or protective stop fills, with realized
+  P&L, holding days, exit reason and the SPY return over the same period.
+- `candidate_outcomes` records what every intent (approved, rejected, watch or avoid) would
+  have returned over 1, 5 and 20 trading days using one fixed rule (`fwd-close-v1`) and stored
+  daily bars, so rejected ideas can be compared with executed ones.
+- Read it at `GET /journal/trades` and `GET /journal/candidates`.
+- Exits the monitor sends (trailing stop, partial profit, Claude sell/trim, stop/take
+  backstop, daily-loss liquidation) are recorded as `monitor-exit` intents with an order row,
+  so their fills close the outcome too; partial exits (by quantity) leave it open.
+
+## Execution controls and reconciliation
+
+- **Every order path is serialized on its intent row** (manual approval, analysis
+  auto-execute, monitor auto-buy): the row is locked and its status re-checked, and each intent
+  has one deterministic `client_order_id`, so a repeated request can never submit twice. If a
+  submit call errors, the broker is asked for that id first — an order it accepted anyway is
+  recorded instead of being marked failed.
+- **Buys need fresh data:** right before submitting a buy, a new quote is fetched; the buy is
+  refused (the intent stays pending) if the quote is missing or stale while the market is open,
+  the limit is off-market, or market data / the broker can't be reached. Sells and protective
+  exits are never blocked by this.
+- **Kill switch** engagement also cancels open BUY orders at the broker (never sells or
+  protective legs), audited per order.
+- **Reconciliation** runs read-only every monitor cycle: managed positions the broker no longer
+  holds are closed, positions the database doesn't know are flagged, and orders the broker no
+  longer lists are reconciled — each only after two consecutive passes agree, so one empty or
+  glitchy broker response changes nothing. A requested sell is never assumed to have completed.
+
+## Research pipeline: specialist analysts
+
+```bash
+RESEARCH_WORKER_ENABLED=true python -m app.workers.research_worker    # from backend/
+```
+
+The watcher's INVESTIGATE / REVIEW_POSITION jobs become research:
+
+- **One frozen evidence bundle per job** (`research_bundles`): the quote, indicators, news,
+  fundamentals, macro data, market regime, the position if held, and the watcher signals that
+  triggered it — each a timestamped fact with a citable id (`quote:AAPL`, `news:123`,
+  `ind:AAPL.rsi_14`, …). Missing data is listed as a gap, never invented.
+- **Five specialist analysts** (`analyst_reports`), each with its own versioned instructions
+  in `backend/skills/<name>/SKILL.md`: technical, news, fundamental, market regime and
+  institutional, on `RESEARCH_MODEL` (Sonnet). They interpret the supplied numbers, separate
+  confirmed facts from rumor, state what would invalidate the view, and may only cite
+  evidence ids from the bundle — a report citing anything else is rejected. An analyst with
+  no relevant data reports `insufficient_data` without a Claude call.
+- A bundle is `ready` for the strategist once the technical analysis succeeds. Single
+  instance, research-role cost ceilings, heartbeats, `GET /research/bundles`. Never trades.
+
+## Opus strategist
+
+```bash
+STRATEGIST_WORKER_ENABLED=true python -m app.workers.strategist_worker   # from backend/
+```
+
+- Takes each `ready` bundle and sends `STRATEGIST_MODEL` (Opus) the analyst reports, the
+  evidence, explicit **conflicts between analysts**, the portfolio's exposure, and this
+  strategy's own track record from the trade journal, with
+  `backend/skills/trade-strategist/SKILL.md` as its instructions. Abstaining is a valid answer.
+- **Every proposal is validated and stored** (`strategy_proposals`): the symbol must match;
+  every cited evidence id must exist in the bundle; the entry range must be within
+  `MAX_LIMIT_DEVIATION_PCT` of the bundle's quote; stop below / target above entry (mirrored
+  for sells, which need a held position); size clamped to `MAX_POSITION_PCT`; stale, expired,
+  future-dated or non-finite data is rejected; one pending strategist intent per symbol.
+- An accepted BUY/SELL becomes a **pending** trade intent (`opus-strategist`) through the same
+  output checks and risk engine as every other intent. It is never executed by the strategist;
+  it waits for approval (or the automation gate).
+- Single instance, Opus cost ceilings (`STRATEGIST_*_BUDGET_USD`), heartbeats,
+  `GET /proposals`, `GET /proposals/{id}`.
+- **Dashboard:** the **Proposals** tab shows each proposal with the Opus recommendation, every
+  specialist report, the cited evidence (with source links), conflicts, limitations, the
+  reason to abstain and any validation or risk violations, and lets you approve or reject a
+  pending intent (approval re-checks risk and submits a **paper** order). The **Events** tab
+  shows the watcher's health, its decision feed and the research job queue, refreshed every 15s.
+  Each decision shows the price and move **at decision time** (from its own signal events,
+  or the last completed minute bar before it), never later data.
+
+## Backtesting
+
+`app/backtest/` replays strategies over stored daily bars (`market_bars`) with the same
+indicator, prescreen and risk logic the live app uses — no Claude calls:
+
+```bash
+python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 2026-11-13 \
+    --split holdout --out report.json          # or --split walk-forward / none
+```
+
+- **Point-in-time:** on simulated day *d* a strategy can only read bars up to *d*; reading
+  ahead raises an error (tested). About 420 days of warm-up history are loaded before `--start`.
+- **Fills:** signals at the close of *d*; limit orders fill on *d+1* at min(open, limit) plus
+  slippage, never above the limit; stops win ties with targets and gap fills use the open;
+  fills are capped at a share of bar volume; fees and slippage are configurable.
+- **Strategies:** a deterministic momentum baseline (top-N by the prescreener score, sized
+  by `risk.evaluate`) and buy-and-hold SPY; `ReplayStrategy` will replay cached AI signals.
+- **Splits:** chronological development / validation / holdout, or walk-forward. Parameters
+  are chosen on validation (or train) windows; the holdout runs once, last.
+- **Report:** net and benchmark-relative return, CAGR, max drawdown, volatility, Sharpe-like
+  ratio, win rate, average win/loss, expectancy, trades, turnover, exposure, a bootstrap
+  95% interval for the mean trade return, and a breakdown by market regime.
+
+### Replaying AI strategies and checking paper fills
+
+```bash
+python -m app.backtest.ai_run --start 2026-09-01 --end 2026-11-14 --split holdout --out reports/ai.json
+python -m app.backtest.paper_report --start 2026-09-01 --end 2026-11-14 --out reports/paper.json
+python -m app.backtest.run ... --created-at 2026-11-17T00:00:00Z --out reports/baseline.json
+```
+
+- **AI replay** re-runs every recorded strategist proposal (and other AI intents) through the
+  real proposal validation and the pure risk engine, then simulates the limit entry, stop,
+  target and horizon with the same fill model as the baseline. Results are grouped by
+  strategy, model and prompt version and compared with the momentum baseline and SPY over
+  the same dates, with calibration (stated confidence vs hit rate) and low-sample flags.
+- **No look-ahead:** entries and exits only use bars strictly after the decision's (UTC)
+  date. **No Claude calls:** recorded outputs are served from a cache keyed by role, model,
+  prompt version and bundle; a miss is skipped and listed, never sent to the API.
+- **Paper experiment report:** for each paper order, compares what the fill model predicted
+  (fill or not, price, slippage) with the actual fill and latency, and reports the fill-rate
+  difference and slippage bias. Read-only.
+- Reports are written to `BACKTEST_REPORT_DIR` (default `backend/reports/`, gitignored) and
+  served read-only at `GET /backtests/reports` and `GET /backtests/reports/{name}`; the
+  dashboard's Performance tab lists them.
+- Limitations: long-only, daily bars, one limit order per decision on the next session, and
+  independent positions (not a shared portfolio).
+
+## Daily review and strategy metrics
+
+```bash
+python -m app.services.review.run --date 2026-11-17            # daily
+python -m app.services.review.run --date 2026-11-17 --weekly   # 7 days ending on the date
+```
+
+Deterministic, read-only over the trade journal (no broker calls), idempotent per period:
+
+- **Performance:** realized and unrealized P&L, fees, slippage (fill vs limit), win rate,
+  average win/loss, expectancy, turnover and max drawdown, against SPY over the same period.
+- **Execution quality:** fill rate, rejected / canceled / expired / partial orders, and
+  submit-to-fill latency.
+- **Missed ideas:** rejected, watch and avoid ideas with their hypothetical outcomes.
+- **Strategy metrics** (`strategy_metrics`) grouped by strategy and version, market regime,
+  holding period, news event type and confidence bucket, with calibration (stated confidence
+  vs realized hit rate). Groups below `REVIEW_MIN_SAMPLE_SIZE` are flagged insufficient.
+- **Optional Claude summary** (`REVIEW_LLM_SUMMARY`, off by default) sees aggregates only; its
+  suggestions are stored as pending proposals and never change anything by themselves.
+- Read it at `GET /reviews`, `GET /reviews/{id}` and `GET /strategy-metrics`; record your
+  decision on suggestions with `POST /reviews/{id}/decision`.
+- **Dashboard:** the **Performance** tab shows daily and weekly reviews (P&L, fees, slippage,
+  drawdown vs SPY, execution quality, missed ideas), strategy metrics with calibration and
+  low-sample flags, and backtest reports. Accepting or rejecting a review's suggestions only
+  records your decision. The **Operations** tab (formerly Settings) adds system health, alerts
+  and recent errors from the `/ops` API, and Claude spend history, next to the automation
+  controls. Sections whose API isn't on the server yet say so instead of showing an error.
+
+## Adaptive risk policies
+
+`app/services/risk_policies.py` runs after the hard rules in `risk.py` — in analysis, in the
+monitor, and again with fresh account data right before a buy is submitted. It can only
+**shrink** a buy or **reject** it; sells, watch and avoid pass through untouched, and the
+hard rules are unchanged (a randomized property test checks this on 1,500 cases).
+
+- **Risk-budget sizing:** stop distance × position size ≤ `RISK_PER_TRADE_PCT` of equity, and
+  smaller still when volatility (ATR) is high; never above `MAX_POSITION_PCT`.
+- **Portfolio caps:** gross exposure and per-sector exposure, counting open positions, open
+  buy orders and earlier buys in the same run.
+- **Correlation:** reject a buy that moves with too many current holdings.
+- **Liquidity:** minimum average daily dollar volume; position ≤ a % of it.
+- **Fail closed:** missing or stale price history, an unknown position value, a failed
+  sector or correlation lookup, or any policy error rejects the buy with a clear code
+  (`ILLIQUID`, `EXPOSURE_UNKNOWN`, `CORRELATION_UNKNOWN`, `SECTOR_UNKNOWN`, `RISK_POLICY_ERROR`).
+  Size reductions are recorded in the audit trail.
+
+## Deployment and operations
+
+```bash
+export POSTGRES_PASSWORD=<choose one>        # required; there is no default
+docker compose up -d --build                 # postgres, migrate, api (:8000), frontend (:5173)
+docker compose --profile workers up -d       # opt in: stream, watcher, research, strategist, health
+```
+
+- Compose runs its **own** Postgres (published on `127.0.0.1:${POSTGRES_HOST_PORT:-5433}`, so
+  it doesn't collide with a local server on 5432) with a one-shot `migrate` job before the API
+  and workers start. Secrets come only from `backend/.env` at runtime; nothing is baked into
+  an image, every port binds to `127.0.0.1`, and `TRADING_MODE` is pinned to `paper`.
+- Plain `docker compose up` starts **no** worker, so nothing spends Claude budget until you
+  add `--profile workers`; each worker still enforces its own budget and the kill switch.
+- **Health:** `GET /health` (liveness) and `GET /health/ready` (database reachable and schema
+  at head; 503 otherwise). The API container's healthcheck uses `/health/ready`.
+- **System health watcher** (`HEALTH_WATCHER_ENABLED=true python -m app.workers.health_watcher`):
+  every `HEALTH_WATCHER_INTERVAL_SECONDS` it checks worker heartbeats, market-data freshness
+  during market hours, order rejects and submit errors, Claude spend against each role's
+  daily budget, the research-job backlog and failures, and reconciliation mismatches. It
+  writes deduplicated alerts to `system_alerts` (one active alert per problem, with a count)
+  and resolves them when the condition clears. It never calls the broker or Claude.
+  The market-stream worker writes a heartbeat (`market_stream`, counts only); set
+  `OPS_EXPECT_MARKET_STREAM=true` when you run it so a silent stream raises an alert.
+- **Ops API:** `GET /ops/status` (workers, queue, data freshness, spend per role, open alerts,
+  recent redacted errors), `GET /ops/alerts`, `POST /ops/alerts/{id}/ack` (audited). Shown on
+  the dashboard's Operations tab.
+- **Retention:** `python -m app.services.ops.retention` is a dry run; `--apply` deletes.
+  Every `RETENTION_*_DAYS` defaults to 0 (keep forever). It only prunes resolved alerts,
+  heartbeats of retired workers, 1-minute bars, news and finished research jobs, and never
+  anything a snapshot, intent or bundle may need for replay. Audit, LLM, order and intent
+  history are never pruned.
+- **Recovery:** research jobs are leased, so a job held by a crashed worker is picked up
+  again when its lease expires; alerts are idempotent across watcher restarts.
+
+## Recurring jobs
+
+```bash
+SCHEDULER_ENABLED=true python -m app.workers.scheduler_worker      # from backend/; opt-in
+```
+
+One scheduler (single instance via a Postgres advisory lock, heartbeat `scheduler`) runs
+these on US/Eastern time, DST-aware. Every run is recorded in `scheduled_job_runs` with a
+unique (job, period), so a restart or a second worker never runs a period twice; a crashed
+run is retried after `SCHEDULER_STALE_RUN_SEC`, up to `SCHEDULER_MAX_ATTEMPTS`. A worker that
+was down past a job's grace window skips that period rather than running it late.
+
+- **Morning briefing** (weekdays 08:30): overnight news, latest quotes for the watchlist and
+  holdings, recent filings, macro observations, open alerts and yesterday's review, as a
+  deterministic digest (`GET /briefings`, `GET /briefings/latest`). An optional Claude
+  summary (`BRIEFING_LLM_SUMMARY`, off) uses the research role, is budget-checked first, sees
+  clipped headlines as untrusted data, and on any error the digest is stored without it.
+- **Candidate scanner** (`SCANNER_ENABLED`, off; every `SCANNER_INTERVAL_MIN` in market
+  hours): ranks symbols outside the watchlist and holdings with the deterministic prescreener
+  on stored data and enqueues the top `SCANNER_TOP_N` as research jobs, never more than
+  `SCANNER_MAX_JOBS_PER_DAY`. It never trades; those jobs only cost Claude budget if the
+  research worker is running.
+- **Weekly evaluation** (Saturday 10:00): the weekly review plus a walk-forward baseline
+  backtest and the AI replay, written to `BACKTEST_REPORT_DIR`. It only writes reports; it
+  never changes a setting, strategy or automation mode.
+- Runs: `GET /scheduler/runs`.
+
+## Development workflow
+
+- `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and
+  lands through pull requests; nothing is pushed to `Production` directly.
+- CI (`.github/workflows/ci.yml`) runs ruff, the pytest suite (with a throwaway Postgres
+  for migration tests) and the frontend build on every PR. It uses no secrets, and
+  Claude and Alpaca are mocked.
+- Changes to risk, execution, broker, automation, migrations, secrets templates or CI are
+  owned by `.github/CODEOWNERS` and need explicit human review.
+- Dependabot opens weekly dependency PRs; the Anthropic and Alpaca SDKs, SQLAlchemy,
+  psycopg and Alembic always arrive as separate PRs.
+- **Auto-merge, only when everything is good:** label a PR `automerge` and, once switched on
+  (repository variable `AUTOMERGE_ENABLED=true`), it merges itself after CI if it targets
+  `Production`, isn't a draft, has all required checks green on its latest commit, has no
+  changes requested, is mergeable, and touches no CODEOWNERS-protected file — anything that
+  can move money or change the schema, config, CI or agent rules always waits for a human.
+  `python3 tools/automerge_policy.py --pr <n>` shows exactly why a PR would or wouldn't merge.
+- `CLAUDE.md` holds the rules for Claude Code in this repository (safety boundaries,
+  commands, definition of done); `.claude/agents/` and `.claude/skills/` define the
+  development agents and workflows (plan an issue, implement it, review a PR, fix CI, run
+  several issues in parallel).
+- **Parallel agents and `PROGRESS.txt`:** roadmap issues run in parallel, one agent per issue
+  in its own git worktree. Open `PROGRESS.txt` at the repo root to watch them: a progress bar
+  per issue, its state and current step, and how many agents are working, refreshed every
+  minute by `python3 tools/agent_progress.py watch`. Agents report milestones with
+  `tools/agent_progress.py update`; the lead marks an issue INTEGRATED only after reviewing,
+  re-testing and pushing it. The board is local and not committed.
+- **Agent task ledger:** `tools/agent_ledger.py` records who owns each issue (actor, agent,
+  branch, PR, retries, budget, commit) and refuses a duplicate claim, overlapping file scopes,
+  more than `--max-retries` repair attempts, too many claims per hour, or anything while
+  paused (`pause` / `resume`). Local and not committed, like the board.
+- **`@claude` on GitHub** (`.github/workflows/claude.yml`, Claude Code GitHub Actions): the
+  owner or a collaborator can write `@claude ...` in an issue, comment or review; Claude works
+  on its own `agent/<issue>-<slug>` branch and replies with a link to open a **draft** PR.
+  Bots, forks and other users are ignored, the workflow token is read-only, Claude has no
+  shell or network and can't read `.env` files or edit workflows, and it never merges.
+  **Off until you enable it:** install the Claude GitHub App (`/install-github-app` in
+  Claude Code, or https://github.com/apps/claude), add the `ANTHROPIC_API_KEY` repository
+  secret, and merge the workflow into `Production` (the action only runs workflow files that
+  match the default branch).
+- **Weekly maintenance triage** (`.github/workflows/maintenance.yml`, Mondays, read-only, no
+  Claude): open PRs with CI state and age, failed runs on the default branch, and Dependabot
+  PRs classified as security / high-risk (Anthropic, Alpaca, SQLAlchemy, psycopg, Alembic,
+  Actions) / major / minor-patch, in the run's summary.
 
 ## Project layout
 
@@ -29,7 +452,9 @@ React dashboard ──▶ FastAPI backend ──▶ Alpaca (paper → live)
 .
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI app + table creation
+│   │   ├── main.py              # FastAPI app; refuses to start on an outdated schema
+│   │   ├── db_migrate.py        # `python -m app.db_migrate` (Alembic upgrade)
+│   │   ├── logging_config.py    # structured JSON logs with secret redaction
 │   │   ├── config.py            # env-driven settings
 │   │   ├── database.py          # SQLAlchemy engine/session
 │   │   ├── models.py            # DB models (audit, intents, orders, ...)
@@ -37,12 +462,16 @@ React dashboard ──▶ FastAPI backend ──▶ Alpaca (paper → live)
 │   │   ├── deps.py              # auth + DB session dependencies
 │   │   ├── services/
 │   │   │   ├── risk.py          # the risk engine (pure, tested)
-│   │   │   ├── analyst.py       # Claude integration (structured output)
+│   │   │   ├── llm.py           # the one Claude client (routing, structured output, accounting)
+│   │   │   ├── analyst.py       # Claude prompts
+│   │   │   ├── intent_validation.py  # fail-closed checks on model output
+│   │   │   ├── automation.py    # modes, kill switch, the automated-order gate
 │   │   │   ├── broker.py        # Alpaca paper/live execution
 │   │   │   └── data_aggregator.py
 │   │   └── routers/             # API routes
-│   ├── tests/test_risk.py
-│   ├── requirements.txt
+│   ├── migrations/              # Alembic revisions
+│   ├── tests/
+│   ├── requirements.txt         # runtime deps (requirements-dev.txt: lint)
 │   └── .env.example
 └── frontend/
     ├── src/                     # React dashboard
@@ -68,15 +497,25 @@ createdb trading_assistant      # or use an existing Postgres instance
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r requirements-dev.txt
 cp .env.example .env             # then edit .env with your keys
+python -m app.db_migrate         # create or upgrade the schema (back up first if it has data)
 uvicorn app.main:app --reload --port 8000
 ```
-Tables are created automatically on startup. API docs at http://localhost:8000/docs
+The app never changes the schema itself; it refuses to start until `python -m app.db_migrate`
+has brought the database to the latest revision. A database created by an older version of
+this app is detected, brought to the baseline, stamped and upgraded automatically. Back it up
+first: `pg_dump -Fc -d trading_assistant -f backups/before-migrate.dump`.
 
-Run the risk-engine tests:
+API docs at http://localhost:8000/docs
+
+Lint and tests (CI runs the same):
 ```bash
+ruff check app tests migrations
 pytest -q
+# migration tests need a disposable database whose name contains "test":
+createdb trading_assistant_test
+TEST_DATABASE_URL=postgresql+psycopg://localhost:5432/trading_assistant_test pytest -q
 ```
 
 ### 4. Frontend
@@ -99,8 +538,13 @@ still requires a confirmation in the UI.
 |-----|-------------|
 | `DATABASE_URL` | `postgresql+psycopg://user:pass@localhost:5432/trading_assistant` |
 | `ANTHROPIC_API_KEY` | Claude API key |
+| `STRATEGIST_MODEL` / `STRATEGIST_EFFORT` | Trade-analysis model and effort (default `claude-opus-5-5` / `high`) |
+| `POSITION_MODEL` / `RESEARCH_MODEL` / `WATCHER_MODEL` | Per-layer models (and matching `*_EFFORT`) |
+| `MAX_DATA_AGE_SEC` / `INTENT_MAX_AGE_MIN` / `MAX_LIMIT_DEVIATION_PCT` | Fail-closed freshness and limit-price checks |
+| `LOG_LEVEL` / `LOG_FORMAT` | `INFO` and `json` (or `text`) |
 | `ALPACA_KEY` / `ALPACA_SECRET` | Alpaca API credentials |
 | `TRADING_MODE` | `paper` (default) or `live` |
+| `AUTO_TRADING_ENABLED` | Server permission for Auto mode, default `false` |
 | `API_TOKEN` | Shared bearer token the frontend sends (set anything; keep secret) |
 | `DAILY_LOSS_LIMIT_PCT` | Kill-switch threshold, default `10` |
 | `NEWS_API_KEY` | Optional — enables newsapi.org headlines |

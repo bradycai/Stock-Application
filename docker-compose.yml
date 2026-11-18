@@ -1,0 +1,122 @@
+# Local deployment. Quick start (from the repo root):
+#   export POSTGRES_PASSWORD=<choose one>     # required, no default
+#   docker compose up -d --build              # postgres, migrate, api, frontend
+#   docker compose --profile workers up -d    # opt in to the background workers
+#
+# Postgres is published on 127.0.0.1:${POSTGRES_HOST_PORT:-5433} (not 5432, so it cannot clash with a
+# local Postgres); containers still reach it as postgres:5432.
+#
+# Secrets (Alpaca, Anthropic, API token, ...) come ONLY from backend/.env at runtime; nothing is
+# baked into an image. Everything binds to 127.0.0.1. TRADING_MODE is pinned to paper here.
+# Back up the database before the first migrate against real data (see CLAUDE.md).
+#
+# Plain `docker compose up` never starts a worker, so nothing spends Claude budget unless you
+# pass --profile workers (the workers also respect their per-role budgets and kill switch).
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+psycopg://trading:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/trading_assistant
+  TRADING_MODE: paper
+  LOG_FORMAT: json
+
+x-backend: &backend
+  build: ./backend
+  env_file:
+    - backend/.env
+  environment: *backend-env
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: trading_assistant
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading -d trading_assistant"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    build: ./backend
+    env_file:
+      - backend/.env
+    environment: *backend-env
+    command: ["python", "-m", "app.db_migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  frontend:
+    build: ./frontend
+    env_file:
+      - path: frontend/.env
+        required: false
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ---- opt-in workers: docker compose --profile workers up -d ----
+  market-stream:
+    <<: *backend
+    profiles: ["workers"]
+    command: ["python", "-m", "app.workers.market_stream"]
+
+  watcher:
+    <<: *backend
+    profiles: ["workers"]
+    environment:
+      <<: *backend-env
+      WATCHER_ENABLED: "true"
+    command: ["python", "-m", "app.workers.market_watcher"]
+
+  research-worker:
+    <<: *backend
+    profiles: ["workers"]
+    environment:
+      <<: *backend-env
+      RESEARCH_WORKER_ENABLED: "true"
+    command: ["python", "-m", "app.workers.research_worker"]
+
+  strategist-worker:
+    <<: *backend
+    profiles: ["workers"]
+    environment:
+      <<: *backend-env
+      STRATEGIST_WORKER_ENABLED: "true"
+    command: ["python", "-m", "app.workers.strategist_worker"]
+
+  health-watcher:
+    <<: *backend
+    profiles: ["workers"]
+    environment:
+      <<: *backend-env
+      HEALTH_WATCHER_ENABLED: "true"
+    command: ["python", "-m", "app.workers.health_watcher"]
+
+volumes:
+  pgdata:

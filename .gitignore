@@ -17,3 +17,20 @@ dist/
 
 # OS
 .DS_Store
+
+# Local database backups (pg_dump) — may contain account data
+backend/backups/
+*.dump
+
+# Tooling caches
+.ruff_cache/
+
+# Agent progress board (local only)
+.progress/
+PROGRESS.txt
+
+# Claude Code agent worktrees (isolated per-issue checkouts)
+.claude/worktrees/
+.progress/*.tmp
+PROGRESS.txt.*.tmp
+backend/reports/

@@ -2,6 +2,7 @@
 from decimal import Decimal
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,7 +14,61 @@ class Settings(BaseSettings):
 
     # Claude
     anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-8"
+
+    # Model routing (one model + effort per layer). Every Claude request goes through
+    # app.services.llm, which applies these.
+    #   strategist — trade analysis (proposes buy/sell/watch/avoid intents)
+    #   position   — continuous-monitor and open-position decisions (empty = strategist model)
+    #   research   — specialist analysts (later phases)
+    #   watcher    — high-frequency event watcher (later phases)
+    strategist_model: str = "claude-opus-5-5"
+    strategist_effort: str = "high"
+    strategist_max_tokens: int = 16000
+
+    # Strategist worker (issue #22): off by default; turns ready research bundles into
+    # validated proposals and, at most, PENDING intents (never executes anything).
+    strategist_worker_enabled: bool = False
+    strategist_poll_seconds: int = 30
+    strategist_lease_seconds: int = 900
+    strategist_daily_budget_usd: float = 5.0      # estimated strategist spend ceiling per UTC day
+    strategist_monthly_budget_usd: float = 60.0   # ... and per UTC month
+    strategist_min_reports: int = 2               # successful analyst reports needed to call Opus
+    position_model: str = ""
+    position_effort: str = "medium"
+    position_max_tokens: int = 8000
+    research_model: str = "claude-sonnet-5-5"
+    research_effort: str = "medium"
+    research_max_tokens: int = 8000
+    # Research worker
+    research_worker_enabled: bool = False
+    research_worker_interval_seconds: int = 30    # poll interval for queued research jobs
+    research_bundle_ttl_minutes: int = 120        # a bundle not strategized by then expires
+    research_daily_budget_usd: float = 5.0        # estimated research-role spend ceiling per UTC day
+    research_monthly_budget_usd: float = 75.0     # ... and per UTC month
+    watcher_model: str = "claude-haiku-5-5"
+    watcher_effort: str = "low"
+    watcher_max_tokens: int = 4000
+
+    # Market watcher (issue #12): off by default; only reads data and queues research jobs.
+    watcher_enabled: bool = False
+    watcher_interval_seconds: int = 60          # clamped to 30-300
+    watcher_closed_sleep_seconds: int = 300     # poll interval outside the market session
+    watcher_cooldown_minutes: int = 15          # min gap between Claude assessments of one symbol
+    watcher_batch_size: int = 8                 # changed symbols per Claude call
+    watcher_daily_budget_usd: float = 2.0       # estimated watcher spend ceiling per UTC day
+    watcher_monthly_budget_usd: float = 30.0    # ... and per UTC month
+    watcher_job_max_attempts: int = 3
+    watcher_job_lease_seconds: int = 300
+
+    # Claude request controls
+    llm_timeout_sec: float = 300.0       # per attempt
+    llm_max_retries: int = 2             # SDK retries on 408/409/429/5xx and network errors
+    llm_refusal_fallbacks: bool = True   # server-side fallback on safety refusals, where supported
+
+    # Fail-closed freshness and sanity limits for model output
+    max_data_age_sec: int = 600          # market snapshot older than this -> no actionable intents
+    intent_max_age_min: int = 60         # pending intents older than this can't be approved
+    max_limit_deviation_pct: Decimal = Decimal("10")  # limit price vs. last price at analysis time
 
     # Alpaca
     alpaca_key: str = ""
@@ -30,14 +85,59 @@ class Settings(BaseSettings):
     penny_stock_price: Decimal = Decimal("5.00")
     max_intraday_gain_pct: Decimal = Decimal("50")
 
+    # Risk policies (app/services/risk_policies.py). These can only REDUCE a position's size
+    # or REJECT a BUY, never loosen the hard rules above. Applied after risk.evaluate in
+    # analysis, the monitor and again at execution.
+    risk_per_trade_pct: Decimal = Decimal("1.0")      # max equity at risk per trade: stop% x size% <= this
+    atr_high_pct: Decimal = Decimal("4.0")            # ATR14 as % of price above this scales size down
+    policy_min_size_pct: Decimal = Decimal("0.25")    # a size cut below this % of equity becomes a rejection
+    max_gross_exposure_pct: Decimal = Decimal("50")   # total long exposure cap, % of equity
+    max_sector_exposure_pct: Decimal = Decimal("25")  # per-sector cap, % of equity (unknown = own bucket)
+    correlation_threshold: Decimal = Decimal("0.85")  # daily-return correlation that counts as high
+    correlation_min_obs: int = 20  # overlapping daily returns needed
+    max_correlated_holdings: int = 2                  # reject when this many holdings are highly correlated
+    min_adv_usd: Decimal = Decimal("1000000")         # minimum average daily dollar volume (20d)
+    max_pct_of_adv: Decimal = Decimal("1.0")          # position notional cap as % of ADV
+    block_when_market_closed: bool = False  # optional: no new entries while closed
+
     # Prescreen + batching pipeline (large-watchlist support)
     max_watchlist_size: int = 500       # hard cap on tickers fetched/screened per run
     prescreen_top_n: int = 30           # how many top-ranked candidates go to Claude
     claude_batch_size: int = 10         # tickers per Claude call
     max_final_recommendations: int = 30 # cap on merged recommendations returned
 
+    # Daily review
+    review_min_sample_size: int = 20    # groups with fewer closed trades are flagged insufficient
+    review_confidence_buckets: str = "0.5,0.6,0.7,0.8,0.9"  # lower bucket edges for calibration
+    review_llm_summary: bool = False    # optional Claude summary of aggregates (proposals only)
+
     # Optional data sources
     news_api_key: str = ""
+
+    # Research data (SEC EDGAR fundamentals, FRED macro). Both are refreshed only by the CLI
+    # (python -m app.services.research_data.refresh), never inside a web request.
+    sec_user_agent: str = ""            # SEC needs a descriptive UA with contact; "" = EDGAR off
+    fred_api_key: str = ""              # "" = FRED disabled
+    sec_max_requests_per_sec: float = 5.0   # client-side limit (SEC allows 10; we stay at <= 5)
+    research_http_timeout_sec: float = 20.0
+
+    # Market data layer (batched Alpaca requests + snapshot store)
+    alpaca_data_feed: str = ""          # "" = the account's default feed (IEX on free plans); "iex" | "sip"
+    data_chunk_size: int = 100          # symbols per batched Alpaca request
+    data_max_concurrency: int = 4       # parallel batched requests (bounded to respect rate limits)
+    bars_cache_ttl_sec: int = 900       # in-process cache for daily bars
+    max_quote_age_sec: int = 120        # during market hours, an older quote is flagged stale
+    news_lookback_hours: int = 48
+    news_per_symbol: int = 5
+    # ETFs used for the market-context block (index trend, sector breadth, volatility proxy).
+    market_context_symbols: str = "SPY,QQQ,IWM,DIA,XLK,XLF,XLE,XLV,XLY,XLP,XLI,XLB,XLU,XLRE,XLC"
+
+    # Streaming worker (python -m app.workers.market_stream)
+    stream_flush_sec: float = 2.0            # latest-quote / bar / news buffers flush this often
+    stream_refill_sec: float = 300.0         # REST refill of 1Min bars missed while disconnected
+    stream_refill_max_minutes: int = 60      # never look back further than this on a refill
+    stream_symbol_refresh_sec: float = 180.0 # re-read watchlist + open positions this often
+    stream_heartbeat_sec: float = 60.0       # structured heartbeat log interval
 
     # Autonomous trading (all default OFF — manual approval is unchanged when off)
     auto_trading_enabled: bool = False
@@ -64,6 +164,11 @@ class Settings(BaseSettings):
     confidence_recheck_interval: int = 300         # force a Claude re-review every N seconds
     max_hold_days: int = 20                        # flag/review positions held longer than this
 
+    @field_validator("watcher_interval_seconds")
+    @classmethod
+    def _clamp_watcher_interval(cls, v: int) -> int:
+        return max(30, min(300, v))
+
     @property
     def partial_levels(self) -> list[float]:
         return [float(x) for x in self.partial_profit_levels.split(",") if x.strip()]
@@ -74,6 +179,47 @@ class Settings(BaseSettings):
 
     # CORS
     frontend_origin: str = "http://localhost:5173"
+
+    # Logging: INFO-level structured logs. LOG_FORMAT=json (default) or text.
+    log_level: str = "INFO"
+    log_format: str = "json"
+
+    # --- backtest reports (PR 08) ---
+    backtest_report_dir: str = "reports"  # relative paths resolve against backend/
+
+    # --- ops (PR 10) ---
+    health_watcher_enabled: bool = False          # the health-watcher worker is opt-in
+    health_watcher_interval_seconds: int = 60     # loop cadence (min 10)
+    ops_heartbeat_stale_sec: int = 300            # a worker heartbeat older than this is stale
+    ops_market_data_stale_sec: int = 300          # market open + newest quote/bar older than this
+    ops_order_failure_window_min: int = 60        # window for order reject/failure counting
+    ops_order_failure_threshold: int = 3          # failures in the window that raise an alert
+    ops_budget_alert_pct: float = 80.0            # warn at this % of a role's daily budget (critical at 100)
+    ops_research_backlog_threshold: int = 25      # queued+leased research jobs that count as a backlog
+    ops_research_failed_threshold: int = 3        # terminally failed research jobs (24h) that alert
+    ops_reconcile_window_min: int = 120           # window for reconciliation mismatch events
+    ops_reconcile_mismatch_threshold: int = 1     # mismatches in the window that raise an alert
+    ops_expect_market_stream: bool = False        # alert when the market_stream worker goes quiet
+    # Retention (python -m app.services.ops.retention): days to keep; 0 = keep forever.
+    retention_system_alerts_days: int = 0         # resolved alerts only
+    retention_worker_heartbeats_days: int = 0     # heartbeat rows of workers that stopped
+    retention_market_bars_days: int = 0           # bars (never those a snapshot/bundle may replay)
+    retention_news_events_days: int = 0           # unreferenced news
+    retention_research_jobs_days: int = 0         # finished jobs not referenced by a bundle/decision
+
+    # --- scheduler & recurring jobs ---
+    scheduler_enabled: bool = False               # the scheduler worker is opt-in
+    scheduler_tick_seconds: int = 30              # how often the worker checks what is due (min 5)
+    scheduler_stale_run_sec: int = 1800           # a `running` run older than this counts as crashed
+    scheduler_retry_delay_sec: int = 300          # wait before retrying a failed run
+    scheduler_max_attempts: int = 3               # retry ceiling per (job, period)
+    scanner_enabled: bool = False                 # candidate scanner (enqueues research jobs only)
+    scanner_interval_min: int = 30                # scan cadence during market hours (ET)
+    scanner_top_n: int = 5                        # jobs enqueued per scan
+    scanner_max_jobs_per_day: int = 10            # hard daily cap on scanner-enqueued jobs
+    scanner_universes: str = ""                   # comma-separated universe names; empty = all
+    briefing_llm_summary: bool = False            # optional Claude summary of the briefing digest
+    briefing_clip_chars: int = 200                # headline clip length passed to the model
 
     @property
     def is_live(self) -> bool:

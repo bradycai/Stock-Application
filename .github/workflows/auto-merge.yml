@@ -1,0 +1,48 @@
+name: Auto-merge
+
+# Merges pull requests labeled `automerge` ONLY when every condition in
+# tools/automerge_policy.py holds (required CI green on the current head commit, not a draft,
+# targets the default branch, no changes requested, mergeable, and no CODEOWNERS-protected
+# file touched). Off unless the repository variable AUTOMERGE_ENABLED is "true".
+#
+# Security: `workflow_run` always runs THIS file and the policy from the default branch, never
+# a pull request's copy, and the job never checks out or executes pull-request code — so a PR
+# cannot change the rules to merge itself. Merges use GITHUB_TOKEN, so branch rulesets (e.g.
+# required human approvals) still apply.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
+jobs:
+  automerge:
+    if: >-
+      vars.AUTOMERGE_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the default branch (trusted policy code only)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Merge eligible pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          AUTOMERGE_ENABLED: ${{ vars.AUTOMERGE_ENABLED }}
+        run: python tools/automerge_policy.py --all --merge --require-enabled

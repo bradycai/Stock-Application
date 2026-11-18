@@ -1,27 +1,33 @@
-"""Automation control: status, enable/disable, and the autonomous event feed."""
+"""Automation control: status, mode (manual / observe / auto), kill switch, event feed."""
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import DB, Actor, audit
-from app.models import AuditLog
-from app.schemas import AutomationEventOut, AutomationStatusOut
-from app.services import automation
+from app.models import AuditLog, Order
+from app.schemas import AutomationEventOut, AutomationModeRequest, AutomationStatusOut, KillSwitchRequest
+from app.services import automation, broker
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
 
 def _status(db: Session) -> AutomationStatusOut:
     allowed, reason = automation.auto_capability()
-    runtime = automation.runtime_enabled(db)
-    active, active_reason = automation.auto_trading_active(db)
+    state = automation.get_state(db)
+    gate = automation.order_gate(db)
     return AutomationStatusOut(
         capability_allowed=allowed,
         capability_reason=reason,
-        runtime_enabled=runtime,
-        active=active,
-        active_reason=active_reason,
+        mode=state.mode,
+        runtime_enabled=state.mode == "auto",
+        observe=gate.observe,
+        kill_switch=state.kill_switch,
+        kill_switch_reason=state.kill_switch_reason,
+        kill_switch_at=state.kill_switch_at,
+        kill_switch_by=state.kill_switch_by,
+        active=gate.allowed,
+        active_reason=gate.reason,
         trading_mode=settings.trading_mode,
         is_paper=not settings.is_live,
         min_confidence=float(settings.auto_min_confidence),
@@ -29,30 +35,98 @@ def _status(db: Session) -> AutomationStatusOut:
     )
 
 
+def _set_mode(db: Session, mode: str, actor: str) -> AutomationStatusOut:
+    # Lock the row so a concurrent kill-switch request can't interleave with this check.
+    state = automation.get_state(db, for_update=True)
+    if mode == "auto":
+        if state.kill_switch:
+            raise HTTPException(status_code=409, detail="Release the kill switch before enabling auto mode")
+        allowed, reason = automation.auto_capability()
+        if not allowed:
+            # Capability is gated by environment — cannot be turned on from the UI.
+            raise HTTPException(status_code=403, detail=reason)
+    previous = state.mode
+    automation.set_mode(db, mode, actor)
+    audit(db, "automation_mode_changed", actor,
+          payload={"from": previous, "to": mode, "trading_mode": settings.trading_mode,
+                   "is_paper": not settings.is_live})
+    db.commit()
+    return _status(db)
+
+
 @router.get("/status", response_model=AutomationStatusOut)
 def get_status(db: Session = DB, _actor: str = Actor):
     return _status(db)
 
 
+@router.post("/mode", response_model=AutomationStatusOut)
+def set_mode(req: AutomationModeRequest, db: Session = DB, actor: str = Actor):
+    return _set_mode(db, req.mode, actor)
+
+
 @router.post("/enable", response_model=AutomationStatusOut)
 def enable(db: Session = DB, actor: str = Actor):
-    allowed, reason = automation.auto_capability()
-    if not allowed:
-        # Capability is gated by environment — cannot be turned on from the UI.
-        raise HTTPException(status_code=403, detail=reason)
-    automation.set_runtime(db, True, actor)
-    audit(db, "automation_enabled", actor,
-          payload={"trading_mode": settings.trading_mode, "is_paper": not settings.is_live})
-    db.commit()
-    return _status(db)
+    """Deprecated alias for POST /automation/mode {"mode": "auto"}."""
+    return _set_mode(db, "auto", actor)
 
 
 @router.post("/disable", response_model=AutomationStatusOut)
 def disable(db: Session = DB, actor: str = Actor):
-    automation.set_runtime(db, False, actor)
-    audit(db, "automation_disabled", actor, payload={})
-    db.commit()
-    return _status(db)
+    """Deprecated alias for POST /automation/mode {"mode": "manual"}."""
+    return _set_mode(db, "manual", actor)
+
+
+class KillSwitchOut(AutomationStatusOut):
+    """Status plus what engaging did to pending entry orders at the broker."""
+    canceled_buy_orders: list[dict] = []
+    cancel_failures: list[dict] = []
+    cancel_error: str | None = None
+
+
+def _cancel_pending_buys(db: Session, actor: str) -> dict:
+    """Best-effort cancel of pending BUY entry orders at the broker. Sell orders and
+    protective stop legs are never touched (the broker helper filters by side). One audit
+    row per order; any failure is reported, never raised."""
+    try:
+        result = broker.cancel_open_buy_orders()
+    except Exception as e:  # noqa: BLE001
+        result = {"canceled": [], "failed": [], "error": str(e)}
+    known = {}
+    for item in result["canceled"] + result["failed"]:
+        row = db.scalars(select(Order).where(Order.broker_order_id == item["broker_order_id"])).first()
+        known[item["broker_order_id"]] = row
+    for item in result["canceled"]:
+        row = known.get(item["broker_order_id"])
+        audit(db, "kill_switch_buy_canceled", actor, order_id=row.id if row else None,
+              intent_id=row.intent_id if row else None,
+              payload={"symbol": item["symbol"], "broker_order_id": item["broker_order_id"],
+                       "qty": item.get("qty"), "status_before": item.get("status")})
+    for item in result["failed"]:
+        row = known.get(item["broker_order_id"])
+        audit(db, "kill_switch_cancel_failed", actor, order_id=row.id if row else None,
+              intent_id=row.intent_id if row else None,
+              payload={"symbol": item["symbol"], "broker_order_id": item["broker_order_id"],
+                       "error": item.get("error")})
+    if result["error"]:
+        audit(db, "kill_switch_cancel_failed", actor, payload={"error": result["error"]})
+    return result
+
+
+@router.post("/kill-switch", response_model=KillSwitchOut)
+def kill_switch(req: KillSwitchRequest, db: Session = DB, actor: str = Actor):
+    """Engage (blocks all automated orders and new buys; mode -> manual) or release it.
+    Releasing does not re-enable automation. Engaging also cancels pending BUY entry orders
+    at the broker (best effort, audited per order); sells and protective legs are untouched."""
+    automation.set_kill_switch(db, req.engaged, actor, req.reason)
+    audit(db, "kill_switch_engaged" if req.engaged else "kill_switch_released", actor,
+          payload={"reason": req.reason})
+    db.commit()  # the switch is engaged before any broker call, whatever happens next
+    cancel = {"canceled": [], "failed": [], "error": None}
+    if req.engaged:
+        cancel = _cancel_pending_buys(db, actor)
+        db.commit()
+    return KillSwitchOut(**_status(db).model_dump(), canceled_buy_orders=cancel["canceled"],
+                         cancel_failures=cancel["failed"], cancel_error=cancel["error"])
 
 
 @router.get("/events", response_model=list[AutomationEventOut])

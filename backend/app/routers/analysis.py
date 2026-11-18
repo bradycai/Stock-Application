@@ -1,4 +1,9 @@
-"""Run an analysis: aggregate data -> Claude -> risk filter -> persist intents."""
+"""Run an analysis: aggregate data -> Claude -> validate + risk filter -> persist intents."""
+import logging
+import time
+import uuid
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Body, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,25 +13,33 @@ from app.models import (
     AccountSnapshot,
     AnalysisRun,
     IntentAction,
+    MarketSnapshot,
     IntentStatus,
     TradeIntent,
     Watchlist,
 )
 from app.config import settings
+from app.logging_config import log_event, run_id_var, safe_error
 from app.schemas import IntentOut, RunAnalysisRequest, RunSummaryOut
 from app.services import (
     analyst,
     automation,
     batch,
     data_aggregator,
+    intent_validation,
     prescreener,
+    snapshots,
     risk,
+    risk_policies,
+    risk_policy_data,
     risk_state,
     universes,
 )
 from app.services.execution import ExecutionError, execute_intent
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size, dedupe_by_ticker
+
+logger = logging.getLogger("trading.analysis")
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -59,11 +72,44 @@ def run_analysis(
     if not tickers:
         raise HTTPException(status_code=400, detail="No tickers; add to the watchlist or pick a universe")
 
-    # 1. Aggregate market data for ALL candidates + capture account snapshot.
+    run_key = f"analysis-{uuid.uuid4().hex[:12]}"
+    token = run_id_var.set(run_key)
     try:
-        context, account = data_aggregator.build_context(tickers)
+        return _run(db, req, tickers, run_key)
+    finally:
+        run_id_var.reset(token)
+
+
+def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str) -> RunSummaryOut:
+    started = time.monotonic()
+    log_event(logger, "analysis.start", tickers=tickers, universe=req.universe,
+              model=settings.strategist_model, effort=settings.strategist_effort)
+
+    # 1. Aggregate market data for ALL candidates + capture account snapshot. The snapshot
+    #    time is taken BEFORE fetching, so data age is measured conservatively.
+    data_as_of = datetime.now(timezone.utc)
+    try:
+        context, account = data_aggregator.build_context(tickers, db=db, run_id=run_key)
     except Exception as e:  # noqa: BLE001
+        log_event(logger, "analysis.data_failed", logging.ERROR, error=safe_error(e))
         raise HTTPException(status_code=502, detail=f"Data aggregation failed: {e}")
+    context["data_as_of"] = data_as_of.isoformat()
+    # The exact data the model is about to see, stored with its quality flags (replayable).
+    market_snapshot = snapshots.save_snapshot(db, purpose="analysis", run_id=run_key, as_of=data_as_of,
+                                              context=context)
+    log_event(logger, "snapshot.saved", snapshot_id=market_snapshot.id, symbols=len(tickers),
+              market_open=market_snapshot.market_open, feed=market_snapshot.feed)
+
+    # [DATA] per-ticker success/failure (never silently drop a ticker).
+    for sym in tickers:
+        m = context["watchlist_data"].get(sym, {})
+        ind = m.get("indicators") or {}
+        if ind.get("data_sufficient"):
+            log_event(logger, "data.ok", ticker=sym, last_price=m.get("last_price"),
+                      history_days=ind.get("history_days"))
+        else:
+            log_event(logger, "data.insufficient", logging.WARNING, ticker=sym,
+                      reason=ind.get("note", "insufficient data"), last_price=m.get("last_price"))
 
     snapshot = AccountSnapshot(
         equity=account["equity"],
@@ -81,20 +127,32 @@ def run_analysis(
     # 2. Quantitative prescreen: rank all candidates, keep only the top N for Claude.
     ranked = prescreener.rank_candidates(context["watchlist_data"], settings.prescreen_top_n)
     top_symbols = [r.symbol for r in ranked]
+    top_set = set(top_symbols)
+    for sym in tickers:
+        log_event(logger, "screen.passed" if sym in top_set else "screen.rejected", ticker=sym,
+                  prescreen_top_n=settings.prescreen_top_n)
 
-    # 3. Batch the top candidates through Claude (CLAUDE_BATCH_SIZE per call). A failed /
-    #    malformed batch is skipped (counted), never crashes the run.
-    token_meta = {"prompt_tokens": 0, "output_tokens": 0}
+    # 3. Batch the top candidates through Claude (CLAUDE_BATCH_SIZE per call). A failed
+    #    batch (refusal, truncation, API error, invalid output) is skipped and counted —
+    #    it never crashes the run and never yields partial output. Each batch is
+    #    HARD-restricted to its own tickers: positions are scoped to the batch and the
+    #    parsed response is filtered so a run only ever produces intents for its tickers.
+    usage = {"prompt_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "prompt_version": None}
+
+    batch_records: list[dict] = []
 
     def analyze_fn(batch_symbols: list[str]) -> list:
-        batch_context = {
-            **context,
-            "watchlist_data": {s: context["watchlist_data"][s] for s in batch_symbols
-                               if s in context["watchlist_data"]},
-        }
-        output, meta, ok = analyst.analyze_batch(batch_context)
-        token_meta["prompt_tokens"] += meta.get("prompt_tokens", 0)
-        token_meta["output_tokens"] += meta.get("output_tokens", 0)
+        # Only this batch's tickers and positions, so Claude isn't tempted to act on
+        # unrelated holdings. The same function rebuilds it from the snapshot on replay.
+        batch_context = snapshots.batch_context(context, batch_symbols)
+        batch_records.append({"symbols": list(batch_symbols),
+                              "context_hash": snapshots.content_hash(batch_context)})
+        output, meta, ok = analyst.analyze_batch(batch_context, allowed_tickers=set(batch_symbols))
+        usage["prompt_tokens"] += meta.get("input_tokens", 0) + meta.get("cache_read_tokens", 0) \
+            + meta.get("cache_write_tokens", 0)
+        usage["output_tokens"] += meta.get("output_tokens", 0)
+        usage["cost_usd"] += meta.get("cost_usd") or 0.0
+        usage["prompt_version"] = meta.get("prompt_version") or usage["prompt_version"]
         if not ok:
             raise RuntimeError(meta.get("error", "batch failed"))
         return list(output.intents)
@@ -103,26 +161,45 @@ def run_analysis(
         top_symbols, settings.claude_batch_size, analyze_fn,
         dedupe_by_ticker, settings.max_final_recommendations,
     )
+    data_age_sec = (datetime.now(timezone.utc) - data_as_of).total_seconds()
 
     run = AnalysisRun(
         snapshot_id=snapshot.id,
-        model=settings.claude_model,
-        prompt_tokens=token_meta["prompt_tokens"],
-        output_tokens=token_meta["output_tokens"],
-        input_context={"tickers_screened": len(tickers), "top_symbols": top_symbols,
-                       "universe": req.universe, **batch_stats},
+        market_snapshot_id=market_snapshot.id,
+        model=settings.strategist_model,
+        prompt_tokens=usage["prompt_tokens"],
+        output_tokens=usage["output_tokens"],
+        input_context={"run_key": run_key, "market_snapshot_id": market_snapshot.id,
+                       "tickers_screened": len(tickers), "top_symbols": top_symbols,
+                       "universe": req.universe, "effort": settings.strategist_effort,
+                       "prompt_version": usage["prompt_version"],
+                       "estimated_cost_usd": round(usage["cost_usd"], 6),
+                       "data_as_of": data_as_of.isoformat(), "data_age_sec": round(data_age_sec, 1),
+                       # Replay: snapshots.batch_context(snapshot.data, symbols) rebuilds each
+                       # batch exactly; its hash must equal context_hash.
+                       "batches_sent": batch_records,
+                       **batch_stats},
         raw_response={"intents": [i.model_dump() for i in merged]},
     )
     db.add(run)
     db.flush()
 
-    # 4. Risk-filter every merged intent and persist
+    # 4. Validate every merged intent (fail closed), then risk-filter and persist.
     account["open_positions"] = context["portfolio"]["open_positions"]
     held_symbols = {p["symbol"] for p in context["positions"]}
     halted, _reason = risk_state.is_halted(db, account)
 
     max_pct = float(settings.max_position_pct)
     out_intents: list[TradeIntent] = []
+
+    # Inputs for the adaptive risk policies (BUYs only; they can only shrink or reject).
+    positions_now = list(context["positions"])  # grows with each buy that passes this run
+    buy_symbols = [i.ticker for i in merged if i.action == "buy"]
+    policy_returns = risk_policy_data.returns_by_symbol(
+        db, list(dict.fromkeys(buy_symbols + [p["symbol"] for p in positions_now]))) if buy_symbols else {}
+    policy_sector_of = risk_policy_data.sector_of(
+        db, {s: (m or {}).get("sector") for s, m in context["watchlist_data"].items()})
+    market_open = (context.get("market") or {}).get("open")
     for ti in merged:  # already deduped (highest confidence per ticker) + capped
         intent_dict = ti.model_dump()
 
@@ -134,8 +211,30 @@ def run_analysis(
         intent_dict["position_size_percent"] = clamped_size
 
         market = context["watchlist_data"].get(ti.ticker, {})
+        output_violations = intent_validation.validate_intent(
+            intent_dict, last_price=market.get("last_price"), data_age_sec=data_age_sec,
+            max_data_age_sec=settings.max_data_age_sec,
+            max_limit_deviation_pct=float(settings.max_limit_deviation_pct),
+            quality=market.get("quality"),
+        )
         ri = build_risk_input(intent_dict, account, held_symbols, halted, market)
         result = risk.evaluate(ri)
+        # Adaptive policies run after the hard rules: a reduced size is re-evaluated by
+        # risk.evaluate (which recomputes qty); a policy violation rejects the intent.
+        try:
+            result, policy_notes = risk_policies.apply(
+                intent_dict, ri, result, positions=positions_now,
+                market=risk_policy_data.market_from_indicators(market, market_open),
+                sector_of=policy_sector_of, returns_by_symbol=policy_returns)
+        except Exception as e:  # noqa: BLE001 - fail closed for THIS intent, keep the run going
+            log_event(logger, "risk_policy.error", logging.ERROR, ticker=ti.ticker, error=safe_error(e))
+            result, policy_notes = risk_policies.fail_closed(result, e)
+        final_size = float(intent_dict.get("position_size_percent") or 0)
+        violations = output_violations + result.as_violation_dicts()
+        passed = result.passed and not output_violations
+        if passed and ti.action == "buy" and result.computed_notional:
+            # Later intents in this run must see this pending buy in exposure/sector totals.
+            positions_now.append({"symbol": ti.ticker, "market_value": float(result.computed_notional)})
 
         row = TradeIntent(
             run_id=run.id,
@@ -143,24 +242,31 @@ def run_analysis(
             action=IntentAction(ti.action),
             order_type=ti.order_type,
             limit_price=ti.limit_price,
-            position_size_percent=clamped_size,  # store the clamped value, not the raw one
+            position_size_percent=final_size,  # the clamped, policy-reduced value
             stop_loss_percent=ti.stop_loss_percent,
             take_profit_percent=ti.take_profit_percent,
             confidence=ti.confidence,
             reason=ti.reason,
             risks=ti.risks,
-            risk_passed=result.passed,
-            risk_violations=result.as_violation_dicts(),
-            computed_qty=result.computed_qty,
+            strategy_id="claude-analysis",
+            strategy_version=usage["prompt_version"],
+            prompt_version=usage["prompt_version"],
+            evidence=list(ti.evidence or []),
+            market_snapshot_id=market_snapshot.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.intent_max_age_min),
+            risk_passed=passed,
+            risk_violations=violations,
+            computed_qty=result.computed_qty if passed else None,
             computed_notional=(
-                float(result.computed_notional) if result.computed_notional else None
+                float(result.computed_notional) if passed and result.computed_notional else None
             ),
         )
 
         if ti.action in ("watch", "avoid"):
             # Non-actionable classifications: surfaced for the user, never executed.
+            # This is a valid analysis RESULT (not a failure) and is persisted/displayed.
             row.status = IntentStatus.recommended
-        elif result.passed:
+        elif passed:
             row.status = IntentStatus.pending_approval
         else:
             row.status = IntentStatus.rejected_by_risk
@@ -169,24 +275,40 @@ def run_analysis(
         db.flush()
         out_intents.append(row)
 
-        # Audit: recommendation, plus rejection if the risk engine blocked it
+        log_event(logger, "validation.result", intent_id=row.id, ticker=ti.ticker, decision=ti.action,
+                  confidence=round(float(ti.confidence or 0), 4), status=row.status.value,
+                  risk_passed=passed, violations=[v["code"] for v in violations])
+
+        # Audit: recommendation, plus rejection if validation or the risk engine blocked it
         audit(db, "recommendation", "claude", intent_id=row.id,
-              payload={"intent": intent_dict, "risk_passed": result.passed,
+              payload={"intent": intent_dict, "risk_passed": passed, "run_key": run_key,
+                       "model": settings.strategist_model, "prompt_version": usage["prompt_version"],
                        **({"position_size_clamped_from": original_size,
-                           "position_size_clamped_to": clamped_size} if size_clamped else {})})
-        if not result.passed:
+                           "position_size_clamped_to": clamped_size} if size_clamped else {}),
+                       **({"risk_policy_notes": policy_notes} if policy_notes else {})})
+        if not passed and ti.action not in ("watch", "avoid"):
             audit(db, "risk_rejection", "risk_engine", intent_id=row.id,
-                  payload={"violations": result.as_violation_dicts()})
+                  payload={"violations": violations})
 
     db.commit()
 
-    # 5. Optional autonomous execution. Only runs when automation is ACTIVE
-    #    (env capability + live confirmation when live + runtime switch ON). When
-    #    inactive — the default — this is a no-op and everything stays manual.
-    active, _why = automation.auto_trading_active(db)
-    if active:
-        _auto_execute_eligible(db, out_intents)
+    # 5. Optional autonomous execution, decided by the single automation gate: env
+    #    capability + mode "auto" + kill switch off. In observe mode the same eligibility
+    #    logic runs but only records what WOULD have executed. In manual mode (the
+    #    default) nothing is automated and every intent waits for a human.
+    gate = automation.order_gate(db)
+    if gate.allowed or gate.observe:
+        _auto_execute_eligible(db, out_intents, observe=gate.observe)
+    else:
+        for row in out_intents:
+            log_event(logger, "auto_trade.skipped", ticker=row.ticker, reason=gate.reason)
 
+    log_event(logger, "analysis.complete", tickers_screened=len(tickers), sent_to_claude=len(top_symbols),
+              batches=batch_stats["batches"], failed_batches=batch_stats["failed_batches"],
+              final_recommendations=len(out_intents), tokens_in=usage["prompt_tokens"],
+              tokens_out=usage["output_tokens"], estimated_cost_usd=round(usage["cost_usd"], 6),
+              elapsed_ms=int((time.monotonic() - started) * 1000),
+              decisions=[(i.ticker, i.action.value, i.status.value) for i in out_intents])
     return RunSummaryOut(
         tickers_screened=len(tickers),
         prescreen_top_n=len(top_symbols),
@@ -198,7 +320,8 @@ def run_analysis(
     )
 
 
-def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
+def _auto_execute_eligible(db: Session, intents: list[TradeIntent], *, observe: bool = False) -> None:
+    """Execute eligible intents, or (observe=True) only record that they would execute."""
     min_conf = float(settings.auto_min_confidence)
     for row in intents:
         if row.status != IntentStatus.pending_approval:
@@ -218,16 +341,43 @@ def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
                            "required_threshold": min_conf, "reason": why,
                            "rejected_by": category})
             db.commit()
+            log_event(logger, "auto_trade.skipped", ticker=row.ticker, reason=why, category=category)
+            continue
+        if observe:
+            audit(db, "observe_would_execute", "automation", intent_id=row.id,
+                  payload={"ticker": row.ticker, "action": row.action.value,
+                           "confidence": round(confidence_pct, 1), "required_threshold": min_conf,
+                           "limit_price": float(row.limit_price or 0), "computed_qty": row.computed_qty})
+            db.commit()
+            log_event(logger, "auto_trade.observed", ticker=row.ticker, intent_id=row.id,
+                      action=row.action.value, confidence=round(confidence_pct, 1))
             continue
         try:
             execute_intent(db, row, actor="automation", auto=True)
             db.commit()
+            log_event(logger, "auto_trade.executed", ticker=row.ticker, intent_id=row.id)
         except ExecutionError as e:
             audit(db, "auto_trade_rejected", "automation", intent_id=row.id,
                   payload={"ticker": row.ticker, "confidence": round(confidence_pct, 1),
                            "required_threshold": min_conf, "reason": str(e.detail),
-                           "rejected_by": "risk_engine", "violations": e.violations})
+                           "rejected_by": "risk_engine" if e.violations else "execution",
+                           "violations": e.violations})
             db.commit()
+            log_event(logger, "auto_trade.rejected", ticker=row.ticker, reason=str(e.detail))
+
+
+@router.get("/snapshots/{snapshot_id}")
+def get_snapshot(snapshot_id: int, db: Session = DB, _actor: str = Actor):
+    """The exact market data an analysis run sent to the model, with its quality flags."""
+    snap = db.get(MarketSnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return {
+        "id": snap.id, "created_at": snap.created_at, "run_id": snap.run_id, "purpose": snap.purpose,
+        "as_of": snap.as_of, "completed_at": snap.completed_at, "feed": snap.feed,
+        "market_open": snap.market_open, "symbols": snap.symbols, "quality": snap.quality,
+        "content_hash": snap.content_hash, "data": snap.data,
+    }
 
 
 @router.get("/runs/{run_id}")
@@ -239,6 +389,7 @@ def get_run(run_id: int, db: Session = DB, _actor: str = Actor):
         "id": run.id,
         "created_at": run.created_at,
         "model": run.model,
+        "market_snapshot_id": run.market_snapshot_id,
         "prompt_tokens": run.prompt_tokens,
         "output_tokens": run.output_tokens,
         "input_context": run.input_context,

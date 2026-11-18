@@ -1,0 +1,31 @@
+# Dependabot version updates. Dependabot reads this file from the repository's default
+# branch (`Production`) and opens its PRs against that branch.
+#
+# High-risk packages (Anthropic SDK, Alpaca SDK, SQLAlchemy, the Postgres driver) are kept
+# OUT of the grouped minor/patch PR so each arrives as its own, review-required PR.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      backend-minor-patches:
+        patterns: ["*"]
+        exclude-patterns: ["anthropic", "alpaca-py", "SQLAlchemy", "psycopg*", "alembic"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    groups:
+      frontend-minor-patches:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

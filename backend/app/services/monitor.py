@@ -13,8 +13,12 @@ Two layers run on one timer:
    engine + the existing execute path; sells/trims auto-execute in paper when confidence
    clears AUTO_SELL_CONFIDENCE. Hard stop/take always remain as backup.
 
+Every broker call here goes through `_may_order(gate, ...)`: an order is placed only when
+the automation gate allows it (env capability + mode "auto" + kill switch off). In
+observe mode the would-be order is recorded instead; in manual mode it is only logged.
+
 Pure, unit-tested pieces: `evaluate_exit`, `daily_loss_breached`, `detect_triggers`
-(in triggers.py), and `plan_monitor_action`.
+(in triggers.py), `plan_monitor_action`, and `_may_order`.
 """
 import asyncio
 import logging
@@ -26,8 +30,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import SessionLocal
 from app.deps import audit
-
-logger = logging.getLogger("trading.monitor")
+from app.logging_config import log_event, run_id_var, safe_error
 from app.models import (
     AnalysisRun,
     IntentAction,
@@ -42,14 +45,22 @@ from app.services import (
     automation,
     broker,
     data_aggregator,
+    exits,
+    intent_validation,
+    order_sync,
     position_manager,
+    reconcile,
     risk,
+    risk_policies,
+    risk_policy_data,
     risk_state,
     triggers,
 )
 from app.services.execution import ExecutionError, execute_intent
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size
+
+logger = logging.getLogger("trading.monitor")
 
 _task: asyncio.Task | None = None
 
@@ -132,9 +143,31 @@ def continuous_capability(s=settings) -> tuple[bool, str]:
 # Helpers                                                                     #
 # --------------------------------------------------------------------------- #
 def _latest_protective_order(db, symbol: str) -> Order | None:
+    # Only entry (buy) orders carry the stop/take levels; recorded exit orders must not
+    # shadow them.
     return db.scalars(
-        select(Order).where(Order.symbol == symbol).order_by(Order.submitted_at.desc())
+        select(Order).where(Order.symbol == symbol, Order.side == "buy")
+        .order_by(Order.submitted_at.desc(), Order.id.desc())
     ).first()
+
+
+def _record_exit_safe(db, symbol: str, result, reason: str, qty, price=None,
+                      full: bool | None = None) -> None:
+    """Write the journal record for an exit order that was just sent. The order is already
+    at the broker, so a failure here is logged + audited and never propagates."""
+    try:
+        with db.begin_nested():
+            exits.record_exit(db, symbol=symbol, result=result, reason=reason, qty=qty,
+                              is_live=settings.is_live, price=price, full=full)
+    except Exception as e:  # noqa: BLE001
+        log_event(logger, "monitor.exit_record_failed", logging.ERROR, symbol=symbol, reason=reason,
+                  error=safe_error(e))
+        try:
+            audit(db, "exit_record_failed", "monitor",
+                  payload={"symbol": symbol, "reason": reason, "error": safe_error(e),
+                           "broker_result": result if isinstance(result, dict) else None})
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _snapshot(symbol, mdata, position, order) -> dict:
@@ -149,6 +182,12 @@ def _snapshot(symbol, mdata, position, order) -> dict:
         "stop_price": float(order.stop_loss_price) if order and order.stop_loss_price else None,
         "take_price": float(order.take_profit_price) if order and order.take_profit_price else None,
     }
+
+
+def _news_items(mdata, limit: int = 3) -> list[dict]:
+    """The newest news items for the model: citable id, headline, event type, is_new."""
+    return [{k: n.get(k) for k in ("id", "headline", "event_type", "is_new", "published_at")}
+            for n in ((mdata or {}).get("news") or [])[:limit]]
 
 
 def _compact_payload(symbol, snap, mdata, position, fired):
@@ -168,19 +207,50 @@ def _compact_payload(symbol, snap, mdata, position, fired):
         },
         "stop_price": snap["stop_price"], "take_price": snap["take_price"],
         "triggers": [t.as_dict() for t in fired],
-        "news": [n.get("title") for n in ((mdata or {}).get("news") or [])[:2]],
+        "news": _news_items(mdata),
+        "quality": (mdata or {}).get("quality"),
         "max_position_pct": float(settings.max_position_pct),
     }
 
 
 def _get_monitor_run(db) -> AnalysisRun:
     run = AnalysisRun(
-        model=settings.claude_model, prompt_tokens=0, output_tokens=0,
+        model=settings.position_model or settings.strategist_model, prompt_tokens=0, output_tokens=0,
         input_context={"source": "continuous_monitor"}, raw_response={},
     )
     db.add(run)
     db.flush()
     return run
+
+
+# Observe-mode records are rate-limited per (symbol, action) so a condition that persists
+# across cycles (e.g. a trailing stop that stays hit) doesn't flood the audit log.
+OBSERVE_COOLDOWN_SEC = 1800
+_LAST_OBSERVED: dict[tuple[str, str], datetime] = {}
+
+
+def _may_order(db, action: str, symbol: str | None = None, **payload) -> bool:
+    """The monitor's single checkpoint before any broker call. True = place the order.
+
+    The gate is re-read from the database on every call, so a kill switch or mode change
+    committed mid-cycle takes effect before the next order. Otherwise nothing is sent:
+    observe mode records an `observe_would_execute` audit event (rate-limited), and manual
+    mode / kill switch / missing capability is only logged.
+    """
+    gate = automation.order_gate(db)
+    if gate.allowed:
+        return True
+    fields = {"action": action, "symbol": symbol, "reason": gate.reason, **payload}
+    if gate.observe:
+        key, now = (symbol or "*", action), datetime.now(timezone.utc)
+        last = _LAST_OBSERVED.get(key)
+        if last is None or (now - last).total_seconds() >= OBSERVE_COOLDOWN_SEC:
+            _LAST_OBSERVED[key] = now
+            audit(db, "observe_would_execute", "monitor", payload=fields)
+        log_event(logger, "monitor.observe_would_execute", **fields)
+    else:
+        log_event(logger, "monitor.order_blocked", **fields)
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -189,10 +259,10 @@ def _get_monitor_run(db) -> AnalysisRun:
 def check_once(db) -> dict:
     MONITOR_STATUS["last_check_at"] = datetime.now(timezone.utc).isoformat()
 
-    auto_active, _r = automation.auto_trading_active(db)
+    gate = automation.order_gate(db)
     cont_ok, _cr = continuous_capability()
-    if not auto_active and not cont_ok:
-        return {"skipped": True}
+    if not (gate.allowed or gate.observe or cont_ok):
+        return {"skipped": True, "reason": gate.reason}
 
     try:
         account = broker.get_account()
@@ -205,14 +275,22 @@ def check_once(db) -> dict:
     # 1. Hard safety backstop (runs whenever either subsystem is on).
     if daily_loss_breached(account["day_pnl_pct"], float(settings.daily_loss_limit_pct)):
         risk_state.halt(db, f"Daily loss limit hit ({account['day_pnl_pct']:.2f}%)", account)
-        automation.set_runtime(db, False, "monitor")
+        # Liquidate first (only if the gate allows it), THEN drop automation to manual —
+        # the reverse order would make the gate block the liquidation itself.
         closed = []
-        for p in positions:
-            try:
-                broker.close_position(p["symbol"])
-                closed.append(p["symbol"])
-            except Exception:  # noqa: BLE001
-                pass
+        if _may_order(db, "daily_loss_liquidation", symbols=[p["symbol"] for p in positions],
+                      day_pnl_pct=account["day_pnl_pct"]):
+            for p in positions:
+                try:
+                    res = broker.close_position(p["symbol"])
+                    closed.append(p["symbol"])
+                except Exception:  # noqa: BLE001
+                    continue
+                _record_exit_safe(db, p["symbol"], res, "daily_loss", p.get("qty"),
+                                  p.get("current_price"), full=True)
+                db.commit()  # the order was sent: persist its journal record at once
+        if automation.get_state(db).mode == "auto":
+            automation.set_mode(db, "manual", "monitor")
         audit(db, "daily_loss_halt", "monitor",
               payload={"day_pnl_pct": account["day_pnl_pct"], "closed": closed})
         for sym in closed:
@@ -228,12 +306,17 @@ def check_once(db) -> dict:
         take = float(order.take_profit_price) if order.take_profit_price is not None else None
         decision = evaluate_exit(p["current_price"], stop, take)
         if decision and order.monitoring_status != "exited":
+            if not _may_order(db, decision, p["symbol"], price=p["current_price"],
+                              stop=stop, take=take):
+                order.last_checked_at = now
+                continue
             try:
-                broker.close_position(p["symbol"])
+                res = broker.close_position(p["symbol"])
             except Exception as e:  # noqa: BLE001
                 audit(db, "order_error", "monitor", order_id=order.id,
                       payload={"error": str(e), "symbol": p["symbol"]})
                 continue
+            _record_exit_safe(db, p["symbol"], res, decision, p.get("qty"), p.get("current_price"), full=True)
             order.exit_reason = decision
             order.monitoring_status = "exited"
             order.last_checked_at = now
@@ -244,6 +327,7 @@ def check_once(db) -> dict:
                   payload={"symbol": p["symbol"], "price": p["current_price"], "stop": stop, "take": take})
             audit(db, "auto_sell_executed", "monitor", order_id=order.id,
                   payload={"symbol": p["symbol"], "reason": decision})
+            db.commit()  # the order was sent: persist its record before anything else can fail
         else:
             order.last_checked_at = now
             order.monitoring_status = order.monitoring_status or "active"
@@ -251,13 +335,13 @@ def check_once(db) -> dict:
     # 2. Continuous AI monitor (only when enabled).
     result = {"checked": len(positions)}
     if cont_ok:
-        result["continuous"] = _run_continuous(db, account, positions)
+        result["continuous"] = _run_continuous(db, account, positions, gate)
 
     db.commit()
     return result
 
 
-def _run_continuous(db, account, positions) -> dict:
+def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
     pos_by_symbol = {p["symbol"]: p for p in positions}
     # Deterministic watchlist order (by insertion id) so the cap is predictable.
     watch = list(
@@ -293,8 +377,10 @@ def _run_continuous(db, account, positions) -> dict:
         _update_status(counts)
         return counts
 
+    data_as_of = datetime.now(timezone.utc)
     try:
-        context, _acct = data_aggregator.build_context(monitored)
+        context, _acct = data_aggregator.build_context(monitored, db=db, run_id=run_id_var.get())
+        db.commit()  # persist news/bars/quotes now, so a per-symbol rollback can't orphan news ids
     except Exception as e:  # noqa: BLE001
         counts["errors"] += 1
         audit(db, "monitor_error", "monitor", payload={"error": f"data: {e}"})
@@ -304,64 +390,70 @@ def _run_continuous(db, account, positions) -> dict:
     market = context["watchlist_data"]
     held = set(pos_by_symbol)
     halted, _ = risk_state.is_halted(db, account)
-    auto_active, _ = automation.auto_trading_active(db)
     auto_sell_conf = float(settings.auto_sell_confidence)
     auto_buy_conf = float(settings.auto_buy_confidence)
-    monitor_run: AnalysisRun | None = None
 
-    for symbol in monitored:
+    run_holder: dict = {"run": None}  # the monitor's AnalysisRun, created on first buy intent
+
+    def handle(symbol: str) -> None:
         mdata = market.get(symbol, {})
         order = _latest_protective_order(db, symbol)
         position = pos_by_symbol.get(symbol)
 
         # HELD positions -> AI exit manager (trailing stop, partials, thesis re-eval).
         if position:
-            try:
-                _manage_position(db, symbol, position, mdata, counts)
-            except Exception as e:  # noqa: BLE001
-                counts["errors"] += 1
-                audit(db, "monitor_error", "monitor", payload={"symbol": symbol, "error": str(e)})
-            continue
+            _manage_position(db, symbol, position, mdata, counts)
+            return
 
         # WATCHLIST (not held) -> trigger -> buy/watch flow (unchanged).
         snap = _snapshot(symbol, mdata, position, order)
         fired = triggers.detect_triggers(_LAST_STATE.get(symbol), snap)
         _LAST_STATE[symbol] = snap
         if not fired:
-            continue
+            return
 
         counts["triggers"] += len(fired)
         audit(db, "monitor_trigger", "monitor",
               payload={"symbol": symbol, "triggers": [t.as_dict() for t in fired]})
 
-        decision, meta, ok = analyst.monitor_decision(_compact_payload(symbol, snap, mdata, position, fired))
+        model_input = _compact_payload(symbol, snap, mdata, position, fired)
+        decision, meta, ok = analyst.monitor_decision(model_input)
         counts["claude_calls"] += 1
         if not ok or decision is None:
             counts["errors"] += 1
             audit(db, "monitor_error", "monitor",
                   payload={"symbol": symbol, "error": meta.get("error")})
-            continue
+            return
 
         conf_pct = decision.confidence * 100
         audit(db, "monitor_decision", "monitor",
               payload={"symbol": symbol, "action": decision.action,
-                       "confidence": round(conf_pct, 1), "reason": decision.reason})
+                       "confidence": round(conf_pct, 1), "reason": decision.reason,
+                       "prompt_version": meta.get("prompt_version"), "model": meta.get("served_model"),
+                       "input": model_input})
 
         plan, why = plan_monitor_action(
             decision.action, conf_pct, auto_sell_conf, auto_buy_conf,
-            has_position=symbol in pos_by_symbol, auto_buy_allowed=auto_active,
+            has_position=symbol in pos_by_symbol, auto_buy_allowed=gate.allowed or gate.observe,
         )
 
         if plan in ("auto_sell", "auto_trim"):
             qty = None
             if plan == "auto_trim" and position:
                 qty = max(1, int(math.floor(position["qty"] / 2)))
+            if not _may_order(db, plan, symbol, qty=qty, confidence=round(conf_pct, 1)):
+                counts["ignored"] += 1
+                return
             try:
-                broker.close_position(symbol, qty=qty)
+                res = broker.close_position(symbol, qty=qty)
             except Exception as e:  # noqa: BLE001
                 counts["errors"] += 1
                 audit(db, "monitor_error", "monitor", payload={"symbol": symbol, "error": str(e)})
-                continue
+                return
+            held_qty = int(float((position or {}).get("qty") or 0))
+            _record_exit_safe(db, symbol, res, "claude_sell" if plan == "auto_sell" else "claude_trim",
+                              qty or held_qty, snap.get("price"),
+                              full=qty is None or (held_qty > 0 and qty >= held_qty))
             if order and plan == "auto_sell":
                 order.exit_reason = "claude_sell"
                 order.monitoring_status = "exited"
@@ -373,16 +465,24 @@ def _run_continuous(db, account, positions) -> dict:
                            "confidence": round(conf_pct, 1), "reason": decision.reason})
             audit(db, "auto_sell_executed", "monitor",
                   payload={"symbol": symbol, "reason": "claude_" + decision.action})
+            db.commit()  # the order was sent: persist its record before anything else can fail
 
         elif plan in ("auto_buy", "manual_review"):
-            monitor_run = monitor_run or _get_monitor_run(db)
-            row = _persist_buy_intent(db, monitor_run, symbol, decision, snap, mdata,
-                                      account, held, halted)
+            run_holder["run"] = run_holder["run"] or _get_monitor_run(db)
+            data_age_sec = (datetime.now(timezone.utc) - data_as_of).total_seconds()
+            row = _persist_buy_intent(db, run_holder["run"], symbol, decision, snap, mdata,
+                                      account, held, halted, fired=fired, data_age_sec=data_age_sec,
+                                      positions=positions,
+                                      market_open=(context.get("market") or {}).get("open"))
             if row.status == IntentStatus.rejected_by_risk:
                 counts["ignored"] += 1
                 audit(db, "monitor_ignored", "monitor",
-                      payload={"symbol": symbol, "reason": "risk rejected", "action": decision.action,
+                      payload={"symbol": symbol, "reason": "validation/risk rejected",
+                               "action": decision.action,
                                "violations": row.risk_violations})
+            elif plan == "auto_buy" and not _may_order(db, "auto_buy", symbol, intent_id=row.id,
+                                                       confidence=round(conf_pct, 1)):
+                counts["ignored"] += 1  # left pending for manual approval
             elif plan == "auto_buy":
                 try:
                     execute_intent(db, row, actor="monitor", auto=True)
@@ -408,6 +508,22 @@ def _run_continuous(db, account, positions) -> dict:
                   payload={"symbol": symbol, "reason": why, "action": decision.action,
                            "confidence": round(conf_pct, 1)})
 
+
+    # Each symbol is its own unit of work: commit after it, so an order sent for one symbol
+    # (and the state/audit that records it) can never be rolled back by a later failure.
+    for symbol in monitored:
+        try:
+            handle(symbol)
+            db.commit()
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            run_holder["run"] = None
+            counts["errors"] += 1
+            log_event(logger, "monitor.symbol_failed", logging.ERROR, symbol=symbol,
+                      error=safe_error(e))
+            audit(db, "monitor_error", "monitor",
+                  payload={"symbol": symbol, "error": safe_error(e)})
+            db.commit()
     _update_status(counts)
     return counts
 
@@ -450,14 +566,20 @@ def _seed_position(db, symbol: str, position: dict) -> PositionManagement:
     return pm
 
 
-def _managed_sell_all(db, pm: PositionManagement, symbol: str, reason: str, counts: dict, price: float):
+def _managed_sell_all(db, pm: PositionManagement, symbol: str, reason: str, counts: dict,
+                      price: float, qty=None) -> bool:
+    """Close the whole position. Returns True only if the order was sent."""
+    if not _may_order(db, reason, symbol, price=price, full=True):
+        counts["ignored"] += 1
+        return False
     try:
         broker.cancel_open_orders(symbol)
-        broker.close_position(symbol)
+        res = broker.close_position(symbol)
     except Exception as e:  # noqa: BLE001
         counts["errors"] += 1
         audit(db, "monitor_error", "monitor", payload={"symbol": symbol, "error": str(e)})
-        return
+        return False
+    _record_exit_safe(db, symbol, res, reason, qty, price, full=True)
     pm.is_open = False
     pm.closed_at = datetime.now(timezone.utc)
     pm.last_decision = reason
@@ -465,17 +587,25 @@ def _managed_sell_all(db, pm: PositionManagement, symbol: str, reason: str, coun
     audit(db, "monitor_auto_sell", "monitor",
           payload={"symbol": symbol, "kind": reason, "full": True, "price": price})
     audit(db, "auto_sell_executed", "monitor", payload={"symbol": symbol, "reason": reason})
+    db.commit()  # the order was sent: persist its record and the closed position at once
+    return True
 
 
 def _managed_sell_partial(db, pm: PositionManagement, symbol: str, position: dict, qty: int,
-                          reason: str, counts: dict, price: float):
+                          reason: str, counts: dict, price: float) -> bool:
+    """Sell part of the position and re-arm a protective stop. True only if sent."""
+    if not _may_order(db, reason, symbol, qty=qty, price=price, partial=True):
+        counts["ignored"] += 1
+        return False
     try:
         broker.cancel_open_orders(symbol)
-        broker.close_position(symbol, qty=qty)
+        res = broker.close_position(symbol, qty=qty)
     except Exception as e:  # noqa: BLE001
         counts["errors"] += 1
         audit(db, "monitor_error", "monitor", payload={"symbol": symbol, "error": str(e)})
-        return
+        return False
+    held_qty = int(float(position.get("qty") or 0))
+    _record_exit_safe(db, symbol, res, reason, qty, price, full=held_qty > 0 and qty >= held_qty)
     counts["partials"] += 1
     audit(db, "monitor_auto_sell", "monitor",
           payload={"symbol": symbol, "kind": reason, "qty": qty, "partial": True, "price": price})
@@ -488,6 +618,8 @@ def _managed_sell_partial(db, pm: PositionManagement, symbol: str, position: dic
             pm.broker_stop_price = float(pm.trailing_stop_price)
         except Exception:  # noqa: BLE001
             pass
+    db.commit()  # the order was sent: persist its record at once
+    return True
 
 
 def _position_payload(symbol, pm, position, mdata, trigs) -> dict:
@@ -510,7 +642,8 @@ def _position_payload(symbol, pm, position, mdata, trigs) -> dict:
             "sma_20": ind.get("sma_20"), "sma_50": ind.get("sma_50"), "sma_200": ind.get("sma_200"),
             "return_5d_pct": ind.get("return_5d_pct"), "return_20d_pct": ind.get("return_20d_pct"),
         },
-        "news": [n.get("title") for n in ((mdata or {}).get("news") or [])[:2]],
+        "news": _news_items(mdata),
+        "quality": (mdata or {}).get("quality"),
         "triggers": trigs,
     }
 
@@ -538,10 +671,11 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
         pm.trailing_stop_price, float(pm.highest_price), dist
     )
 
-    # 1. Trailing / hard stop -> sell everything.
+    # 1. Trailing / hard stop -> sell everything. If the gate blocks the sale (manual /
+    #    observe / kill switch), keep going so the position still gets reviewed.
     if position_manager.is_trailing_stop_hit(price, float(pm.trailing_stop_price)):
-        _managed_sell_all(db, pm, symbol, "trailing_stop", counts, price)
-        return
+        if _managed_sell_all(db, pm, symbol, "trailing_stop", counts, price, qty=position.get("qty")):
+            return
 
     # 2. Partial profit ladder (one level per cycle).
     gain = position_manager.gain_pct(float(pm.entry_price), price)
@@ -552,10 +686,13 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
         amt = amounts[levels.index(lvl)] if lvl in levels and len(amounts) > levels.index(lvl) else (
             amounts[0] if amounts else 20)
         qty = position_manager.partial_qty(pm.original_qty, amt)
-        _managed_sell_partial(db, pm, symbol, position, qty, f"partial_{int(lvl)}pct", counts, price)
-        pm.partial_levels_taken = list(pm.partial_levels_taken or []) + [lvl]
-        pm.last_decision = f"partial_{int(lvl)}pct"
-        return
+        # Record the level as taken only if the sell was actually sent.
+        level = f"partial_{int(lvl)}pct"
+        if _managed_sell_partial(db, pm, symbol, position, qty, level, counts, price):
+            pm.partial_levels_taken = list(pm.partial_levels_taken or []) + [lvl]
+            pm.last_decision = level
+            db.commit()  # record the level as taken together with the sent order
+            return
 
     # 3. Review triggers -> Claude position review.
     prev = _LAST_STATE.get(symbol) or {}
@@ -575,7 +712,8 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
 
     counts["triggers"] += len(trigs)
     audit(db, "monitor_trigger", "monitor", payload={"symbol": symbol, "triggers": trigs, "held": True})
-    decision, meta, ok = analyst.position_review(_position_payload(symbol, pm, position, mdata, trigs))
+    model_input = _position_payload(symbol, pm, position, mdata, trigs)
+    decision, meta, ok = analyst.position_review(model_input)
     counts["claude_calls"] += 1
     if not ok or decision is None:
         counts["errors"] += 1
@@ -590,11 +728,12 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
     pm.last_analyzed_at = now
     audit(db, "monitor_decision", "monitor",
           payload={"symbol": symbol, "action": decision.action, "confidence": round(conf_pct, 1),
-                   "reason": decision.reason, "held": True})
+                   "reason": decision.reason, "held": True, "prompt_version": meta.get("prompt_version"),
+                   "model": meta.get("served_model"), "input": model_input})
 
     outcome = position_manager.decide_exit(decision.action, conf_pct, float(settings.ai_exit_confidence))
     if outcome == "sell":
-        _managed_sell_all(db, pm, symbol, "claude_sell", counts, price)
+        _managed_sell_all(db, pm, symbol, "claude_sell", counts, price, qty=position.get("qty"))
     elif outcome == "trim":
         amt = settings.partial_amounts[0] if settings.partial_amounts else 20
         qty = position_manager.partial_qty(pm.original_qty, amt)
@@ -614,7 +753,12 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
                        "reason": decision.reason})
 
 
-def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, halted) -> TradeIntent:
+def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, halted, *,
+                        fired=(), data_age_sec: float = 0.0, positions=(),
+                        market_open: bool | None = None) -> TradeIntent:
+    """Persist a monitor-proposed buy. It must pass the same fail-closed output checks as an
+    analysis intent (fresh data, limit near market, sane stop/take, evidence) AND the risk
+    engine to become pending_approval; otherwise it is stored as rejected_by_risk."""
     max_pct = float(settings.max_position_pct)
     size = clamp_position_size(decision.size_percent or 0, max_pct)
     limit_price = decision.limit_price or snap.get("price") or 0
@@ -623,22 +767,51 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
         "position_size_percent": size,
         "stop_loss_percent": decision.stop_loss_percent or DEFAULT_STOP_PCT,
         "take_profit_percent": decision.take_profit_percent or DEFAULT_TAKE_PCT,
+        "reason": decision.reason,
+        "risks": "(continuous monitor)",
+        # The deterministic triggers that prompted the decision are its evidence.
+        "evidence": [f"trigger {t.type}: {t.detail}" for t in fired],
     }
+    output_violations = intent_validation.validate_intent(
+        intent_dict, last_price=(mdata or {}).get("last_price") or snap.get("price"),
+        data_age_sec=data_age_sec, max_data_age_sec=settings.max_data_age_sec,
+        max_limit_deviation_pct=float(settings.max_limit_deviation_pct),
+        quality=(mdata or {}).get("quality"),
+    )
     ri = build_risk_input(intent_dict, account, held, halted, mdata)
     res = risk.evaluate(ri)
+    # Adaptive policies after the hard rules: may only shrink the size (re-evaluated by
+    # risk.evaluate) or reject the entry.
+    try:
+        policy_symbols = list(dict.fromkeys([symbol] + [p["symbol"] for p in positions]))
+        res, policy_notes = risk_policies.apply(
+            intent_dict, ri, res, positions=positions,
+            market=risk_policy_data.market_from_indicators(mdata, market_open),
+            sector_of=risk_policy_data.sector_of(db, {symbol: (mdata or {}).get("sector")}),
+            returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))
+    except Exception as e:  # noqa: BLE001 - fail closed for this intent
+        log_event(logger, "risk_policy.error", logging.ERROR, ticker=symbol, error=safe_error(e))
+        res, policy_notes = risk_policies.fail_closed(res, e)
+    size = float(intent_dict["position_size_percent"])
+    passed = res.passed and not output_violations
+    violations = output_violations + res.as_violation_dicts()
     row = TradeIntent(
         run_id=run.id, ticker=symbol, action=IntentAction.buy, order_type="limit",
         limit_price=limit_price, position_size_percent=size,
         stop_loss_percent=intent_dict["stop_loss_percent"],
         take_profit_percent=intent_dict["take_profit_percent"],
         confidence=decision.confidence, reason=decision.reason, risks="(continuous monitor)",
-        risk_passed=res.passed, risk_violations=res.as_violation_dicts(),
-        computed_qty=res.computed_qty,
-        computed_notional=float(res.computed_notional) if res.computed_notional else None,
-        status=IntentStatus.pending_approval if res.passed else IntentStatus.rejected_by_risk,
+        strategy_id="continuous-monitor", evidence=list(intent_dict["evidence"]),
+        risk_passed=passed, risk_violations=violations,
+        computed_qty=res.computed_qty if passed else None,
+        computed_notional=float(res.computed_notional) if passed and res.computed_notional else None,
+        status=IntentStatus.pending_approval if passed else IntentStatus.rejected_by_risk,
     )
     db.add(row)
     db.flush()
+    if policy_notes:
+        audit(db, "risk_policy_adjusted", "monitor", intent_id=row.id,
+              payload={"ticker": symbol, "size_percent": size, "notes": policy_notes})
     return row
 
 
@@ -689,11 +862,31 @@ def get_status() -> dict:
 
 def check_once_safe() -> None:
     db = SessionLocal()
+    token = run_id_var.set(f"monitor-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}")
     try:
-        check_once(db)
-    except Exception:  # noqa: BLE001
+        # Read-only journal sync; runs in every mode (it never places orders) and a
+        # failure here must not stop the monitor cycle.
+        order_sync.sync_orders(db)
+    except Exception as e:  # noqa: BLE001
         db.rollback()
+        log_event(logger, "order_sync.cycle_failed", logging.WARNING, error=safe_error(e, 500))
+    try:
+        # Read-only broker reconciliation (positions / open orders vs the database); own
+        # failure domain, every mode, places nothing.
+        reconcile.reconcile(db)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log_event(logger, "reconcile.cycle_failed", logging.WARNING, error=safe_error(e, 500))
+    try:
+        result = check_once(db)
+        if not result.get("skipped"):
+            log_event(logger, "monitor.cycle", **{k: v for k, v in result.items() if k != "continuous"},
+                      **(result.get("continuous") or {}))
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log_event(logger, "monitor.cycle_failed", logging.ERROR, error=safe_error(e, 500))
     finally:
+        run_id_var.reset(token)
         db.close()
 
 

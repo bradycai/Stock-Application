@@ -295,6 +295,46 @@ def get_order_status(broker_order_id: str) -> dict:
     }
 
 
+def _order_snapshot(order) -> dict:
+    def num(v):
+        return float(v) if v not in (None, "") else None
+    status = getattr(order.status, "value", order.status)
+    otype = getattr(getattr(order, "order_type", None), "value", getattr(order, "order_type", None))
+    side = getattr(getattr(order, "side", None), "value", getattr(order, "side", None))
+    return {
+        "broker_order_id": str(getattr(order, "id", "")),
+        "status": str(status),
+        "side": str(side) if side is not None else None,
+        "order_type": str(otype) if otype is not None else None,
+        "qty": int(float(order.qty)) if getattr(order, "qty", None) not in (None, "") else None,
+        "filled_qty": int(float(order.filled_qty or 0)),
+        "filled_avg_price": num(order.filled_avg_price),
+        "filled_at": getattr(order, "filled_at", None),
+    }
+
+
+def find_order_by_client_id(client_order_id: str) -> dict | None:
+    """READ-ONLY: the broker's order with this client_order_id, or None if it has none (or the
+    lookup fails). Used after a submit error to learn whether the order was accepted anyway."""
+    try:
+        order = trading_client().get_order_by_client_id(client_order_id)
+    except Exception:  # noqa: BLE001
+        return None
+    details = _order_snapshot(order)
+    details.update(symbol=getattr(order, "symbol", None), client_order_id=client_order_id,
+                   limit_price=float(order.limit_price) if getattr(order, "limit_price", None) else None)
+    return details
+
+
+def get_order_details(broker_order_id: str) -> dict:
+    """READ-ONLY order lookup for journaling: status, fill quantity/price/time and, for
+    bracket orders, the same fields for each child leg. Places or changes nothing."""
+    order = trading_client().get_order_by_id(broker_order_id)
+    details = _order_snapshot(order)
+    details["legs"] = [_order_snapshot(leg) for leg in (getattr(order, "legs", None) or [])]
+    return details
+
+
 # --------------------------------------------------------------------------- #
 # Position closing (used by the autonomous position monitor)                  #
 # --------------------------------------------------------------------------- #
@@ -378,7 +418,53 @@ def close_position(symbol: str, qty: int | None = None) -> dict:
     else:
         order = trading_client().close_position(symbol)
     return {"symbol": symbol, "qty": qty, "broker_order_id": str(getattr(order, "id", "")),
+            "client_order_id": str(getattr(order, "client_order_id", "") or ""),
             "status": str(getattr(getattr(order, "status", None), "value", "submitted"))}
+
+
+# Order statuses for which a cancel request is meaningful.
+_CANCELABLE_STATUSES = {
+    "new", "accepted", "held", "partially_filled", "pending_new", "accepted_for_bidding",
+}
+
+
+def list_open_orders() -> list[dict]:
+    """READ-ONLY: every open order at the broker as plain dicts (includes bracket legs)."""
+    from alpaca.trading.enums import QueryOrderStatus
+    from alpaca.trading.requests import GetOrdersRequest
+
+    out = []
+    for o in trading_client().get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN)):
+        out.append({
+            "broker_order_id": str(getattr(o, "id", "")),
+            "client_order_id": str(getattr(o, "client_order_id", "") or ""),
+            "symbol": o.symbol,
+            "side": str(getattr(o.side, "value", o.side)),
+            "status": str(getattr(o.status, "value", o.status)),
+            "qty": int(float(o.qty)) if getattr(o, "qty", None) not in (None, "") else None,
+        })
+    return out
+
+
+def cancel_open_buy_orders() -> dict:
+    """Cancel pending BUY orders (new entries) only. Sell orders and protective stop legs are
+    NEVER touched. Best effort: a failure on one order is reported and the rest continue.
+    Returns {"canceled": [...], "failed": [...], "error": str | None}."""
+    result: dict = {"canceled": [], "failed": [], "error": None}
+    try:
+        open_orders = list_open_orders()
+    except Exception as e:  # noqa: BLE001
+        result["error"] = f"could not list open orders: {e}"
+        return result
+    for o in open_orders:
+        if o["side"] != "buy" or o["status"].lower().split(".")[-1] not in _CANCELABLE_STATUSES:
+            continue
+        try:
+            trading_client().cancel_order_by_id(o["broker_order_id"])
+            result["canceled"].append(o)
+        except Exception as e:  # noqa: BLE001
+            result["failed"].append({**o, "error": str(e)})
+    return result
 
 
 def close_all_positions() -> None:

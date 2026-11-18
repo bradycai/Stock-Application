@@ -1,17 +1,24 @@
-"""Autonomous-trading gating logic.
+"""Automation gating: who may place orders without a human clicking "approve".
 
-Two layers:
-  * capability  — set by environment (AUTO_TRADING_ENABLED, plus the explicit live
-                  confirmation when TRADING_MODE=live). This is the hard ceiling.
-  * runtime     — the user's on/off switch, persisted in AutomationState, toggled via
-                  the /automation endpoints.
+Two independent permissions must BOTH allow an automated order:
+  * environment capability — AUTO_TRADING_ENABLED=true, plus
+    AUTO_LIVE_TRADING_CONFIRMATION=I_UNDERSTAND_THE_RISK when TRADING_MODE=live. This is
+    the hard ceiling; it can't be changed from the UI.
+  * runtime state (database, set via /automation) — mode == "auto" and the kill switch off.
 
-Auto-execution requires BOTH, so leaving AUTO_TRADING_ENABLED=false (the default) keeps
-the manual-approval flow completely unchanged.
+Modes:
+  manual  (default) nothing is automated; intents wait for manual approval.
+  observe automation runs its decision logic and records what it WOULD do
+          ("observe_would_execute" audit events) but places no orders.
+  auto    eligible decisions execute, subject to the risk engine.
 
-The pure functions (`auto_capability`, `should_auto_execute`) take plain values so they
-are trivially unit-testable without a DB, broker, or network.
+The kill switch persists until released. It blocks every automated order AND new buys
+from manual approval; risk-reducing manual sells and broker-side stop orders still work.
+
+`evaluate_gate` and `should_auto_execute` are pure and unit-tested; `order_gate(db)` is
+the single check every automated order path calls immediately before touching the broker.
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -29,7 +36,17 @@ AUTOMATION_EVENTS = [
     "daily_loss_halt",
     "automation_enabled",
     "automation_disabled",
+    "automation_mode_changed",
+    "observe_would_execute",
+    "auto_order_blocked",
+    "kill_switch_engaged",
+    "kill_switch_released",
+    "kill_switch_buy_canceled",
+    "kill_switch_cancel_failed",
+    "entry_blocked",
 ]
+
+MODES = ("manual", "observe", "auto")
 
 
 def auto_capability(s=settings) -> tuple[bool, str]:
@@ -79,26 +96,79 @@ def should_auto_execute(
     return True, "eligible", "eligible"
 
 
+@dataclass(frozen=True)
+class OrderGate:
+    """Whether an automated order may be placed right now, and why (not)."""
+    allowed: bool
+    observe: bool   # True: evaluate and record would-be orders, but place none
+    mode: str
+    kill_switch: bool
+    reason: str
+
+
+def evaluate_gate(*, mode: str, kill_switch: bool, capability_ok: bool,
+                  capability_reason: str, kill_reason: str | None = None) -> OrderGate:
+    """Pure decision table for automated orders. Fails closed on an unknown mode."""
+    if kill_switch:
+        return OrderGate(False, False, mode, True, f"kill switch engaged: {kill_reason or 'no reason given'}")
+    if mode == "observe":
+        return OrderGate(False, True, mode, False, "observe-only mode: decisions are logged, no orders")
+    if mode != "auto":
+        return OrderGate(False, False, mode, False,
+                         "manual mode: automated orders disabled" if mode == "manual"
+                         else f"unknown automation mode {mode!r}")
+    if not capability_ok:
+        return OrderGate(False, False, mode, False, capability_reason)
+    return OrderGate(True, False, mode, False, "auto mode")
+
+
 # --------------------------------------------------------------------------- #
 # Runtime state (DB-backed)                                                   #
 # --------------------------------------------------------------------------- #
-def get_state(db: Session) -> AutomationState:
-    state = db.get(AutomationState, 1)
+def get_state(db: Session, *, fresh: bool = False, for_update: bool = False) -> AutomationState:
+    """The singleton row. `fresh` re-reads it from the database instead of returning the
+    session's cached copy (so a kill switch committed by another request is seen at once);
+    `for_update` also locks the row until the caller's transaction ends."""
+    state = db.get(AutomationState, 1, populate_existing=fresh or for_update,
+                   with_for_update=True if for_update else None)
     if state is None:
-        state = AutomationState(id=1, enabled=False)
+        state = AutomationState(id=1, mode="manual", kill_switch=False)
         db.add(state)
         db.flush()
     return state
 
 
-def runtime_enabled(db: Session) -> bool:
-    return get_state(db).enabled
+def order_gate(db: Session) -> OrderGate:
+    """Evaluate the gate from a FRESH read of the automation state. Call it immediately
+    before each automated broker call, never once per batch or cycle."""
+    state = get_state(db, fresh=True)
+    ok, reason = auto_capability()
+    return evaluate_gate(mode=state.mode, kill_switch=state.kill_switch, capability_ok=ok,
+                         capability_reason=reason, kill_reason=state.kill_switch_reason)
 
 
-def set_runtime(db: Session, enabled: bool, actor: str) -> AutomationState:
-    state = get_state(db)
-    state.enabled = enabled
+def set_mode(db: Session, mode: str, actor: str) -> AutomationState:
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}")
+    state = get_state(db, for_update=True)
+    state.mode = mode
     state.updated_at = datetime.now(timezone.utc)
+    state.updated_by = actor
+    db.flush()
+    return state
+
+
+def set_kill_switch(db: Session, engaged: bool, actor: str, reason: str | None = None) -> AutomationState:
+    """Engaging or releasing both leave the mode at manual, so releasing never resumes
+    automation by itself — even if a mode change raced with the engage."""
+    state = get_state(db, for_update=True)
+    now = datetime.now(timezone.utc)
+    state.kill_switch = engaged
+    state.kill_switch_reason = (reason or "engaged from the dashboard") if engaged else None
+    state.kill_switch_at = now if engaged else None
+    state.kill_switch_by = actor if engaged else None
+    state.mode = "manual"
+    state.updated_at = now
     state.updated_by = actor
     db.flush()
     return state
@@ -114,10 +184,6 @@ def clear_events(db: Session, actor: str) -> datetime:
 
 
 def auto_trading_active(db: Session) -> tuple[bool, str]:
-    """Effective gate: capability AND runtime switch. Returns (active, reason)."""
-    allowed, reason = auto_capability()
-    if not allowed:
-        return False, reason
-    if not runtime_enabled(db):
-        return False, "automation switch is OFF"
-    return True, "active"
+    """Effective permission for automated orders. Returns (active, reason)."""
+    gate = order_gate(db)
+    return gate.allowed, gate.reason

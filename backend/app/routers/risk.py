@@ -1,6 +1,5 @@
 """Risk state + emergency kill switch + position-limit diagnostics."""
 import logging
-from datetime import date
 
 from fastapi import APIRouter, HTTPException
 from sqlalchemy.orm import Session

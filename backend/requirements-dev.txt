@@ -1,0 +1,2 @@
+# Development / CI-only tools. Runtime dependencies live in requirements.txt.
+ruff==0.17.5

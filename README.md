@@ -196,6 +196,27 @@ and ideas that were rejected or never traded:
   longer lists are reconciled — each only after two consecutive passes agree, so one empty or
   glitchy broker response changes nothing. A requested sell is never assumed to have completed.
 
+## Research pipeline: specialist analysts
+
+```bash
+RESEARCH_WORKER_ENABLED=true python -m app.workers.research_worker    # from backend/
+```
+
+The watcher's INVESTIGATE / REVIEW_POSITION jobs become research:
+
+- **One frozen evidence bundle per job** (`research_bundles`): the quote, indicators, news,
+  fundamentals, macro data, market regime, the position if held, and the watcher signals that
+  triggered it — each a timestamped fact with a citable id (`quote:AAPL`, `news:123`,
+  `ind:AAPL.rsi_14`, …). Missing data is listed as a gap, never invented.
+- **Five specialist analysts** (`analyst_reports`), each with its own versioned instructions
+  in `backend/skills/<name>/SKILL.md`: technical, news, fundamental, market regime and
+  institutional, on `RESEARCH_MODEL` (Sonnet). They interpret the supplied numbers, separate
+  confirmed facts from rumor, state what would invalidate the view, and may only cite
+  evidence ids from the bundle — a report citing anything else is rejected. An analyst with
+  no relevant data reports `insufficient_data` without a Claude call.
+- A bundle is `ready` for the strategist once the technical analysis succeeds. Single
+  instance, research-role cost ceilings, heartbeats, `GET /research/bundles`. Never trades.
+
 ## Backtesting
 
 `app/backtest/` replays strategies over stored daily bars (`market_bars`) with the same

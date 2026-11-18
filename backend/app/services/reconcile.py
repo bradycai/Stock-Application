@@ -34,6 +34,22 @@ logger = logging.getLogger("trading.reconcile")
 
 UNKNOWN_POSITION_DEDUPE = timedelta(hours=24)
 EXIT_LOOKBACK = timedelta(days=2)
+# A position or order must be reported missing by two passes at least this far apart before
+# the database is changed, so one empty or glitchy broker response can't close every managed
+# position (losing trailing-stop / partial-profit state) or end tracking of a live order.
+CONFIRM_MISSING_AFTER = timedelta(seconds=50)
+LAG_AUDIT_DEDUPE = timedelta(hours=1)
+_missing_since: dict[tuple[str, str], datetime] = {}
+
+
+def _confirmed_missing(key: tuple[str, str], now: datetime) -> bool:
+    """True once `key` has been missing on an earlier pass at least CONFIRM_MISSING_AFTER ago."""
+    first = _missing_since.setdefault(key, now)
+    return now - first >= CONFIRM_MISSING_AFTER
+
+
+def _seen(key: tuple[str, str]) -> None:
+    _missing_since.pop(key, None)
 FAILED_EXIT_STATUSES = {"canceled", "expired", "rejected"}
 
 
@@ -69,7 +85,11 @@ def reconcile(db: Session) -> dict:
     now = datetime.now(timezone.utc)
     for pm in managed:
         if pm.symbol in held:
+            _seen(("position", pm.symbol))
             continue
+        if not _confirmed_missing(("position", pm.symbol), now):
+            continue  # wait for a second pass before trusting "not held"
+        _seen(("position", pm.symbol))
         pm.is_open = False
         pm.closed_at = now
         pm.last_decision = "reconciled_not_held_at_broker"
@@ -103,6 +123,9 @@ def reconcile(db: Session) -> dict:
             details = broker.get_order_details(order.broker_order_id)
         except Exception as e:  # noqa: BLE001
             if getattr(e, "status_code", None) == 404:
+                if not _confirmed_missing(("order", str(order.id)), now):
+                    continue  # a single 404 may be transient: confirm on a later pass
+                _seen(("order", str(order.id)))
                 order.status = "missing_at_broker"
                 audit(db, "reconcile_order_missing", "reconcile", order_id=order.id,
                       payload={"symbol": order.symbol, "broker_order_id": order.broker_order_id,
@@ -116,6 +139,10 @@ def reconcile(db: Session) -> dict:
             continue
         # The broker no longer has it open but our row is still live: leave the status
         # change (and any fill/outcome journaling) to order_sync's next pass.
+        _seen(("order", str(order.id)))
+        if _recently_audited(db, "reconcile_order_lag", order_id=order.id, within=LAG_AUDIT_DEDUPE):
+            counts["orders_lagging"] += 1
+            continue
         audit(db, "reconcile_order_lag", "reconcile", order_id=order.id,
               payload={"symbol": order.symbol, "db_status": order.status,
                        "broker_status": _norm_status(details.get("status"))})

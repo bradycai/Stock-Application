@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import audit
-from app.logging_config import log_event
+from app.logging_config import log_event, safe_error
 from app.models import IntentStatus, Order, TradeIntent
 from app.services import automation, broker, intent_validation, market_data, risk, risk_state, snapshots
 from app.services.orchestrator import build_risk_input
@@ -114,8 +114,21 @@ def check_entry_data(db: Session, intent: TradeIntent, intent_dict: dict, actor:
                      {"last_price": last_price, "limit_price": intent_dict["limit_price"]})
 
 
+def _lock_intent(db, intent) -> None:
+    """SELECT ... FOR UPDATE on the intent row (no-op for the non-SQLAlchemy fakes in tests)."""
+    if isinstance(db, Session):
+        db.refresh(intent, with_for_update=True)
+
+
 def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool = False) -> Order:
     """Re-validate risk and submit a bracket order. Caller commits afterward."""
+    # Serialize every path that can execute this intent (manual approve, analysis
+    # auto-execute, monitor auto-buy) on the intent row, and re-check its status under the
+    # lock: a second caller waits, then sees it is no longer pending.
+    _lock_intent(db, intent)
+    if intent.status != IntentStatus.pending_approval:
+        raise ExecutionError(409, f"Intent is {intent.status.value}, not awaiting execution")
+
     # 0. Fail closed on stale proposals: an intent is only valid for a short window after
     #    the market snapshot it was based on.
     expire_if_stale(db, intent)
@@ -232,9 +245,32 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
               payload={"ticker": intent.ticker, "reason": str(e)})
         raise ExecutionError(409, str(e))
     except Exception as e:  # noqa: BLE001
-        intent.status = IntentStatus.order_failed
-        audit(db, "order_error", "system", intent_id=intent.id, payload={"error": str(e)})
-        raise ExecutionError(502, f"Broker rejected order: {e}")
+        # The error may hide an order the broker DID accept (e.g. a timeout on the response).
+        # Look it up by our deterministic client_order_id before declaring failure.
+        accepted = broker.find_order_by_client_id(client_order_id)
+        if accepted is None or not accepted.get("broker_order_id"):
+            intent.status = IntentStatus.order_failed
+            audit(db, "order_error", "system", intent_id=intent.id, payload={"error": str(e)})
+            raise ExecutionError(502, f"Broker rejected order: {e}")
+        entry = float(intent_dict.get("limit_price") or 0)
+        stop_pct = float(intent_dict.get("stop_loss_percent") or 0)
+        order_data = {
+            "broker_order_id": accepted["broker_order_id"],
+            "symbol": accepted.get("symbol") or intent.ticker,
+            "side": accepted.get("side") or intent.action.value,
+            "qty": accepted.get("qty") or result.computed_qty,
+            "order_type": accepted.get("order_type") or "limit",
+            "limit_price": accepted.get("limit_price") or entry,
+            "stop_loss_price": round(entry * (1 - stop_pct / 100), 2)
+            if intent.action.value == "buy" and entry and stop_pct else None,
+            "take_profit_price": None, "status": accepted.get("status") or "accepted",
+            "raw": {"recovered_after_error": safe_error(e, 300), "broker": accepted},
+        }
+        audit(db, "order_submit_recovered", "system", intent_id=intent.id,
+              payload={"client_order_id": client_order_id,
+                       "broker_order_id": accepted["broker_order_id"], "error": safe_error(e, 300)})
+        log_event(logger, "order.submit_recovered", logging.WARNING, intent_id=intent.id,
+                  broker_order_id=accepted["broker_order_id"], client_order_id=client_order_id)
 
     order = Order(
         intent_id=intent.id,

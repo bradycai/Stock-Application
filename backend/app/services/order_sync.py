@@ -115,7 +115,7 @@ def _apply_outcomes(db: Session, order: Order, details: dict, status: str) -> No
                     break
 
     elif order.side == "sell" and status == "filled" and price \
-            and not exits.is_partial_exit(order.exit_reason):
+            and not exits.is_partial_exit(order.exit_reason, order.raw):
         # A partial trim (profit ladder / Claude trim) leaves shares held: it must not close
         # the trade outcome. Only a full exit does.
         outcome = _open_outcome(db, order.symbol)

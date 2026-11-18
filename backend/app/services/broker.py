@@ -313,6 +313,19 @@ def _order_snapshot(order) -> dict:
     }
 
 
+def find_order_by_client_id(client_order_id: str) -> dict | None:
+    """READ-ONLY: the broker's order with this client_order_id, or None if it has none (or the
+    lookup fails). Used after a submit error to learn whether the order was accepted anyway."""
+    try:
+        order = trading_client().get_order_by_client_id(client_order_id)
+    except Exception:  # noqa: BLE001
+        return None
+    details = _order_snapshot(order)
+    details.update(symbol=getattr(order, "symbol", None), client_order_id=client_order_id,
+                   limit_price=float(order.limit_price) if getattr(order, "limit_price", None) else None)
+    return details
+
+
 def get_order_details(broker_order_id: str) -> dict:
     """READ-ONLY order lookup for journaling: status, fill quantity/price/time and, for
     bracket orders, the same fields for each child leg. Places or changes nothing."""

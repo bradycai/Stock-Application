@@ -31,13 +31,19 @@ EXIT_STRATEGY_ID = "monitor-exit"
 PARTIAL_EXIT_REASONS = ("claude_trim",)
 
 
-def is_partial_exit(reason: str | None) -> bool:
+def is_partial_exit(reason: str | None, raw: dict | None = None) -> bool:
+    """Whether an exit leaves shares behind. The quantity decision recorded when the order
+    was sent wins (a "partial" that clamped to the whole holding is a full exit); the reason
+    label is only a fallback for older rows."""
+    if isinstance(raw, dict) and isinstance(raw.get("full_exit"), bool):
+        return not raw["full_exit"]
     r = reason or ""
     return r.startswith("partial_") or r in PARTIAL_EXIT_REASONS
 
 
 def record_exit(db: Session, *, symbol: str, result: dict | None, reason: str, qty: int | float | None,
-                is_live: bool, price: float | None = None, actor: str = "monitor") -> Order | None:
+                is_live: bool, price: float | None = None, actor: str = "monitor",
+                full: bool | None = None) -> Order | None:
     """Record a sent exit order. Returns the Order, or None when the broker returned no order
     id (nothing was placed, e.g. no position). Idempotent per broker order id."""
     result = result if isinstance(result, dict) else {}
@@ -80,7 +86,8 @@ def record_exit(db: Session, *, symbol: str, result: dict | None, reason: str, q
         symbol=symbol, side="sell", qty=exit_qty, order_type="market",
         limit_price=None, status=str(result.get("status") or "submitted").lower().split(".")[-1],
         is_live=is_live, exit_reason=reason,
-        raw={"source": "monitor_exit", "reason": reason, "broker": result},
+        raw={"source": "monitor_exit", "reason": reason, "broker": result,
+             **({"full_exit": full} if full is not None else {})},
     )
     db.add(order)
     db.flush()

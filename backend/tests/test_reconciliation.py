@@ -76,6 +76,13 @@ def _audits(db, event):
     return db.scalars(select(AuditLog).where(AuditLog.event_type == event)).all()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_reconcile_state():
+    reconcile._missing_since.clear()
+    yield
+    reconcile._missing_since.clear()
+
+
 @pytest.fixture()
 def fake(monkeypatch):
     """Fake broker. Order-placing calls are recorded; anything not faked fails the test."""
@@ -221,10 +228,13 @@ def test_failed_journal_write_never_breaks_the_cycle(pg_db, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 2. reconciliation                                                           #
 # --------------------------------------------------------------------------- #
-def test_reconcile_closes_managed_position_no_longer_held(pg_db, fake):
+def test_reconcile_closes_managed_position_no_longer_held(pg_db, fake, monkeypatch):
     _i, _e, pm = _open_trade(pg_db, fake)
     fake.positions = []
-    counts = reconcile.reconcile(pg_db)
+    counts = reconcile.reconcile(pg_db)  # first pass: only noted (one empty response is not trusted)
+    assert counts["positions_closed"] == 0 and pm.is_open is True
+    monkeypatch.setattr(reconcile, "CONFIRM_MISSING_AFTER", timedelta(0))
+    counts = reconcile.reconcile(pg_db)  # a later pass confirms
     pg_db.refresh(pm)
     assert counts["positions_closed"] == 1 and pm.is_open is False and pm.closed_at is not None
     assert pm.last_decision == "reconciled_not_held_at_broker"
@@ -253,10 +263,12 @@ def test_reconcile_flags_unknown_broker_position_once(pg_db, fake):
     assert row.payload["symbol"] == "ZZZZ"
 
 
-def test_reconcile_marks_order_the_broker_has_never_heard_of(pg_db, fake):
+def test_reconcile_marks_order_the_broker_has_never_heard_of(pg_db, fake, monkeypatch):
     order = _order(pg_db, _intent(pg_db, _run(pg_db)), status="new", broker_id="ghost")
     pg_db.commit()
     fake.details["ghost"] = NotFound("order not found")
+    assert reconcile.reconcile(pg_db)["orders_missing"] == 0  # a single 404 may be transient
+    monkeypatch.setattr(reconcile, "CONFIRM_MISSING_AFTER", timedelta(0))
     counts = reconcile.reconcile(pg_db)
     pg_db.refresh(order)
     assert counts["orders_missing"] == 1 and order.status == "missing_at_broker"
@@ -482,10 +494,46 @@ def test_duplicate_approval_cannot_double_submit(pg_db, entry_env):
     pg_db.commit()
     with pytest.raises(execution.ExecutionError) as e:
         execution.execute_intent(pg_db, intent, "user:operator")  # a repeated request
+    # Stopped by the row lock + status re-check before reaching the broker.
     assert e.value.status_code == 409
     assert len(entry_env.submitted) == 1 and first.client_order_id == entry_env.submitted[0]
-    assert _audits(pg_db, "duplicate_submit_blocked")
     assert len(pg_db.scalars(select(Order).where(Order.intent_id == intent.id)).all()) == 1
+
+
+def test_deterministic_client_order_id_blocks_resubmit_even_if_status_is_reset(pg_db, entry_env):
+    intent = _buy(pg_db)
+    execution.execute_intent(pg_db, intent, "user:operator")
+    pg_db.commit()
+    intent.status = IntentStatus.pending_approval  # e.g. a manual DB edit or a buggy path
+    pg_db.commit()
+    with pytest.raises(execution.ExecutionError) as e:
+        execution.execute_intent(pg_db, intent, "user:operator")
+    assert e.value.status_code == 409 and len(entry_env.submitted) == 1
+    assert _audits(pg_db, "duplicate_submit_blocked")
+
+
+def test_order_accepted_despite_a_submit_error_is_recorded_not_failed(pg_db, entry_env, monkeypatch):
+    def flaky_submit(intent_dict, qty, client_order_id):
+        entry_env.submitted.append(client_order_id)
+        raise TimeoutError("read timed out")  # the broker got it, the response was lost
+    monkeypatch.setattr(broker, "submit_bracket_order", flaky_submit)
+    monkeypatch.setattr(broker, "find_order_by_client_id", lambda cid: {
+        "broker_order_id": "brk-123", "status": "accepted", "side": "buy", "qty": 50,
+        "order_type": "limit", "symbol": "AAPL", "limit_price": 100.0, "client_order_id": cid})
+    intent = _buy(pg_db)
+    order = execution.execute_intent(pg_db, intent, "user:operator")
+    assert order.broker_order_id == "brk-123" and intent.status == IntentStatus.submitted
+    assert _audits(pg_db, "order_submit_recovered")
+
+
+def test_submit_error_with_no_order_at_the_broker_fails(pg_db, entry_env, monkeypatch):
+    monkeypatch.setattr(broker, "submit_bracket_order",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("rejected")))
+    monkeypatch.setattr(broker, "find_order_by_client_id", lambda cid: None)
+    intent = _buy(pg_db)
+    with pytest.raises(execution.ExecutionError) as e:
+        execution.execute_intent(pg_db, intent, "user:operator")
+    assert e.value.status_code == 502 and intent.status == IntentStatus.order_failed
 
 
 def test_client_order_id_is_stable_per_intent(pg_db, entry_env):
@@ -518,3 +566,20 @@ def test_partially_filled_full_exit_closes_only_when_filled(pg_db, fake, auto_ga
                                      filled_at=T0 + timedelta(days=1))
     order_sync.sync_orders(pg_db)
     assert pg_db.scalars(select(TradeOutcome)).one().status == "closed"
+
+
+
+def test_one_empty_positions_response_does_not_close_managed_rows(pg_db, fake):
+    _i, _e, pm = _open_trade(pg_db, fake)
+    fake.positions = []
+    reconcile.reconcile(pg_db)              # glitch: broker briefly reports nothing
+    fake.positions = [{"symbol": pm.symbol, "qty": 10}]
+    reconcile.reconcile(pg_db)              # back to normal before confirmation
+    pg_db.refresh(pm)
+    assert pm.is_open is True and (("position", pm.symbol) not in reconcile._missing_since)
+
+
+def test_partial_label_that_clamped_to_the_whole_holding_is_a_full_exit():
+    assert exits.is_partial_exit("partial_5pct", {"full_exit": True}) is False
+    assert exits.is_partial_exit("trailing_stop", {"full_exit": False}) is True
+    assert exits.is_partial_exit("partial_5pct", None) is True  # legacy rows: label fallback

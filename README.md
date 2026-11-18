@@ -110,6 +110,24 @@ quality and cost are evaluated.
 - **Coverage:** the free IEX feed carries only part of US volume; the feed in use is
   recorded with every snapshot.
 
+## Trade journal
+
+Every proposal, order and outcome is linked so results can be measured, including losses
+and ideas that were rejected or never traded:
+
+- Intents record their strategy (`claude-analysis` or `continuous-monitor`), prompt version,
+  the evidence the model cited, the market snapshot they came from, and an expiry.
+- A read-only order sync (every monitor cycle, in every mode, and `POST /journal/sync`) pulls
+  order status and fills from Alpaca into `order_fills`, opens a `trade_outcomes` row when a
+  buy fills and closes it when the position's sell or protective stop fills, with realized
+  P&L, holding days, exit reason and the SPY return over the same period.
+- `candidate_outcomes` records what every intent (approved, rejected, watch or avoid) would
+  have returned over 1, 5 and 20 trading days using one fixed rule (`fwd-close-v1`) and stored
+  daily bars, so rejected ideas can be compared with executed ones.
+- Read it at `GET /journal/trades` and `GET /journal/candidates`.
+- Known gap: positions closed with a direct close-position call (the monitor's exits) have no
+  order record yet, so their outcomes stay open until broker reconciliation lands (PR 07).
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

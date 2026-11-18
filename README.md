@@ -283,6 +283,24 @@ Deterministic, read-only over the trade journal (no broker calls), idempotent pe
 - Read it at `GET /reviews`, `GET /reviews/{id}` and `GET /strategy-metrics`; record your
   decision on suggestions with `POST /reviews/{id}/decision`.
 
+## Adaptive risk policies
+
+`app/services/risk_policies.py` runs after the hard rules in `risk.py` — in analysis, in the
+monitor, and again with fresh account data right before a buy is submitted. It can only
+**shrink** a buy or **reject** it; sells, watch and avoid pass through untouched, and the
+hard rules are unchanged (a randomized property test checks this on 1,500 cases).
+
+- **Risk-budget sizing:** stop distance × position size ≤ `RISK_PER_TRADE_PCT` of equity, and
+  smaller still when volatility (ATR) is high; never above `MAX_POSITION_PCT`.
+- **Portfolio caps:** gross exposure and per-sector exposure, counting open positions, open
+  buy orders and earlier buys in the same run.
+- **Correlation:** reject a buy that moves with too many current holdings.
+- **Liquidity:** minimum average daily dollar volume; position ≤ a % of it.
+- **Fail closed:** missing or stale price history, an unknown position value, a failed
+  sector or correlation lookup, or any policy error rejects the buy with a clear code
+  (`ILLIQUID`, `EXPOSURE_UNKNOWN`, `CORRELATION_UNKNOWN`, `SECTOR_UNKNOWN`, `RISK_POLICY_ERROR`).
+  Size reductions are recorded in the audit trail.
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

@@ -28,6 +28,7 @@ from app.services import (
     monitor,
     order_sync,
     reconcile,
+    risk_policy_data,
 )
 
 UTC = timezone.utc
@@ -74,6 +75,13 @@ def _details(status="filled", filled_qty=10, price=100.0, filled_at=T0, side="bu
 
 def _audits(db, event):
     return db.scalars(select(AuditLog).where(AuditLog.event_type == event)).all()
+
+
+@pytest.fixture(autouse=True)
+def _liquid_market_bars(monkeypatch):
+    """These tests have no stored bars; give the execution-time risk policies a liquid market."""
+    monkeypatch.setattr(risk_policy_data, "market_from_bars", lambda db, sym, price: {
+        "last_price": price, "atr_14": 1.0, "avg_volume_20": 5_000_000, "market_open": True})
 
 
 @pytest.fixture(autouse=True)
@@ -423,6 +431,7 @@ def entry_env(monkeypatch, pg_db):
 
     monkeypatch.setattr(broker, "get_account", get_account)
     monkeypatch.setattr(broker, "get_positions", lambda: [])
+    monkeypatch.setattr(broker, "list_open_orders", lambda: [])
     monkeypatch.setattr(broker, "get_quote_and_intraday",
                         lambda s: {"last_price": 100.0, "intraday_change_pct": 0.0})
     monkeypatch.setattr(broker, "submit_bracket_order", submit)

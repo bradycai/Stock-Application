@@ -18,7 +18,17 @@ from app.config import settings
 from app.deps import audit
 from app.logging_config import log_event, safe_error
 from app.models import IntentStatus, Order, TradeIntent
-from app.services import automation, broker, intent_validation, market_data, risk, risk_state, snapshots
+from app.services import (
+    automation,
+    broker,
+    intent_validation,
+    market_data,
+    risk,
+    risk_policies,
+    risk_policy_data,
+    risk_state,
+    snapshots,
+)
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size
 
@@ -183,6 +193,41 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
                        "held_symbols": sorted(held_symbols)})
         raise ExecutionError(422, {"violations": result.as_violation_dicts()},
                              violations=result.as_violation_dicts())
+
+    # 2'. BUY only: adaptive risk policies on FRESH positions/account. They can only shrink
+    #     the size (qty is recomputed by risk.evaluate) or reject; any failure to evaluate
+    #     them blocks the entry (fail closed).
+    if intent.action.value == "buy":
+        try:
+            # Open (unfilled) broker buy orders count toward exposure like held positions.
+            policy_positions = list(positions) + risk_policy_data.open_buy_exposure(
+                db, broker.list_open_orders())
+            policy_symbols = list(dict.fromkeys([intent.ticker] + [p["symbol"] for p in policy_positions]))
+            result, policy_notes = risk_policies.apply(
+                intent_dict, ri, result, positions=policy_positions,
+                market=risk_policy_data.market_from_bars(db, intent.ticker, intent_dict["limit_price"]),
+                sector_of=risk_policy_data.sector_of(db),
+                returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))
+        except Exception as e:  # noqa: BLE001
+            _block_entry(db, intent, actor, auto, 503, "RISK_POLICY_ERROR",
+                         f"risk policies could not be evaluated: {safe_error(e)}")
+        if not result.passed:
+            violations = result.as_violation_dicts()
+            intent.status = IntentStatus.rejected_by_risk
+            intent.risk_passed = False
+            intent.risk_violations = violations
+            audit(db, "risk_rejection", "risk_engine", intent_id=intent.id,
+                  payload={"violations": violations, "at": "auto" if auto else "approval",
+                           "stage": "risk_policies"})
+            log_event(logger, "risk.rejected", logging.WARNING, intent_id=intent.id, ticker=intent.ticker,
+                      actor=actor, auto=auto, risk_passed=False, violations=[v["code"] for v in violations])
+            raise ExecutionError(422, {"violations": violations}, violations=violations)
+        new_size = float(intent_dict["position_size_percent"])
+        if new_size < float(intent.position_size_percent or 0):
+            audit(db, "risk_policy_adjusted", "risk_engine", intent_id=intent.id,
+                  payload={"from": float(intent.position_size_percent or 0), "to": new_size,
+                           "notes": policy_notes})
+            intent.position_size_percent = new_size
 
     intent.computed_qty = result.computed_qty
     intent.computed_notional = (

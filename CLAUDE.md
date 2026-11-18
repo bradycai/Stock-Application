@@ -65,8 +65,8 @@ npm run dev                   # http://localhost:5173
 - Python 3.12, line length 110, `ruff` clean. Keep pure logic (risk, triggers, prescreen,
   position math) free of DB/network so it stays unit-testable.
 - Every state change that matters is written to `audit_log` via `deps.audit()`.
-- Small, focused PRs; one issue per branch named `agent/<issue>-<slug>`; never push to
-  `main` or `Production` directly.
+- `Production` is the default (trunk) branch. Small, focused PRs into it; one issue per
+  branch named `agent/<issue>-<slug>`; never push to `Production` directly.
 
 ## Definition of done
 

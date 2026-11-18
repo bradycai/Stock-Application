@@ -4,7 +4,7 @@ import { request } from "./client";
 
 // FastAPI answers an unknown route with exactly "Not Found". A 404 from these
 // endpoints means "this server does not have the feature yet", not a failure.
-export const isNotAvailable = (e) => e?.message === "Not Found";
+export const isNotAvailable = (e) => e?.status === 404 && e?.message === "Not Found";
 
 const enc = encodeURIComponent;
 

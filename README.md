@@ -282,6 +282,12 @@ Deterministic, read-only over the trade journal (no broker calls), idempotent pe
   suggestions are stored as pending proposals and never change anything by themselves.
 - Read it at `GET /reviews`, `GET /reviews/{id}` and `GET /strategy-metrics`; record your
   decision on suggestions with `POST /reviews/{id}/decision`.
+- **Dashboard:** the **Performance** tab shows daily and weekly reviews (P&L, fees, slippage,
+  drawdown vs SPY, execution quality, missed ideas), strategy metrics with calibration and
+  low-sample flags, and backtest reports. Accepting or rejecting a review's suggestions only
+  records your decision. The **Operations** tab (formerly Settings) adds system health, alerts
+  and recent errors from the `/ops` API, and Claude spend history, next to the automation
+  controls. Sections whose API isn't on the server yet say so instead of showing an error.
 
 ## Adaptive risk policies
 

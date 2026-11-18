@@ -7,6 +7,7 @@ import MonitorPage from "./pages/MonitorPage";
 import HistoryPage from "./pages/HistoryPage";
 import OrdersPage from "./pages/OrdersPage";
 import ResearchPage from "./pages/ResearchPage";
+import JournalPage from "./pages/JournalPage";
 import UsagePage from "./pages/UsagePage";
 import SettingsPage from "./pages/SettingsPage";
 
@@ -105,6 +106,7 @@ export default function App() {
       {tab === "history" && <HistoryPage {...shared} />}
       {tab === "orders" && <OrdersPage {...shared} />}
       {tab === "research" && <ResearchPage />}
+      {tab === "journal" && <JournalPage />}
       {tab === "usage" && <UsagePage />}
       {tab === "settings" && <SettingsPage {...shared} />}
 

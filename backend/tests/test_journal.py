@@ -296,6 +296,7 @@ def test_journal_endpoints(client, pg_db, fake_broker):
     assert len(trades) == 1
     assert trades[0]["intent_id"] == intent.id and trades[0]["run_id"] == run.id
     assert trades[0]["status"] == "open" and trades[0]["symbol"] == "AAPL"
+    assert trades[0]["side"] == "buy"
     assert "market_snapshot_id" in trades[0]
 
     cands = client.get("/journal/candidates").json()

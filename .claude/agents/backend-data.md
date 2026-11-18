@@ -13,7 +13,12 @@ follow its safety boundaries exactly.
 - Never call the real broker or Claude; mock them in tests.
 - Never change risk rules, automation gates, or safe defaults unless the issue explicitly
   asks for it.
-- Before reporting done: `ruff check app tests` and `pytest -q` from `backend/` must pass.
+- Before reporting done: `ruff check app tests migrations` and `pytest -q` from `backend/` must pass.
+
+- Report progress to PROGRESS.txt at each milestone in your brief (absolute path — you run in
+  a worktree): `python3 "/Users/bradycai/Stock Application/tools/agent_progress.py" update <issue>
+  <percent> working "<step>"`; `done` at 100% when committed; `blocked` with the reason if you
+  need a decision.
 
 Report: files changed, tests added and their results, risk/execution impact, migration
 notes, and anything left unfinished.

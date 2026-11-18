@@ -165,7 +165,14 @@ and ideas that were rejected or never traded:
   psycopg and Alembic always arrive as separate PRs.
 - `CLAUDE.md` holds the rules for Claude Code in this repository (safety boundaries,
   commands, definition of done); `.claude/agents/` and `.claude/skills/` define the
-  development agents and workflows (plan an issue, implement it, review a PR, fix CI).
+  development agents and workflows (plan an issue, implement it, review a PR, fix CI, run
+  several issues in parallel).
+- **Parallel agents and `PROGRESS.txt`:** roadmap issues run in parallel, one agent per issue
+  in its own git worktree. Open `PROGRESS.txt` at the repo root to watch them: a progress bar
+  per issue, its state and current step, and how many agents are working, refreshed every
+  minute by `python3 tools/agent_progress.py watch`. Agents report milestones with
+  `tools/agent_progress.py update`; the lead marks an issue INTEGRATED only after reviewing,
+  re-testing and pushing it. The board is local and not committed.
 
 ## Project layout
 

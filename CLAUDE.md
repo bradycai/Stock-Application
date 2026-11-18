@@ -86,6 +86,23 @@ npm run dev                   # http://localhost:5173
 - `Production` is the default (trunk) branch. Small, focused PRs into it; one issue per
   branch named `agent/<issue>-<slug>`; never push to `Production` directly.
 
+## Parallel agent workflow and PROGRESS.txt
+
+Roadmap work runs as several issues in parallel, one agent per issue in its own git worktree,
+with the lead session reviewing and integrating (full procedure: `.claude/skills/run-agent-workflow`).
+
+- **Progress board:** `PROGRESS.txt` at the repo root shows a progress bar per issue, its state
+  (QUEUED / WORKING / DONE / INTEGRATED / BLOCKED), the current step, the branch, and how many
+  agents are working. The lead runs `python3 tools/agent_progress.py watch --interval 60` in
+  the background so it refreshes every minute.
+- **Agents must report** at each milestone of their brief, with an absolute path (they run in
+  worktrees): `python3 "<repo>/tools/agent_progress.py" update <issue> <percent> working "<step>"`;
+  `done` at 100% once committed, `blocked` with the reason when a decision is needed.
+- **The lead marks** `integrate <issue>` only after reading the diff, re-running lint/tests/build,
+  adding docs, scanning for secrets, pushing, and opening the draft PR.
+- `.progress/` (per-issue state) and `PROGRESS.txt` are local and gitignored: the board rewrites
+  itself every minute, so it is never committed.
+
 ## Definition of done
 
 - `ruff check app tests migrations` and `pytest -q` pass locally and in CI (including the
@@ -95,3 +112,4 @@ npm run dev                   # http://localhost:5173
   automated path bypasses the automation gates.
 - The PR description lists: summary, tests run, risk/execution impact, migration notes,
   cost impact (Claude usage), and rollback steps.
+- In the parallel workflow: the issue shows INTEGRATED in `PROGRESS.txt`.

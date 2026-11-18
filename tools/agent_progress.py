@@ -42,7 +42,7 @@ def _now() -> datetime:
 
 def _write_json(path: str, data) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"  # per-process temp file: concurrent writers can't collide
     with open(tmp, "w") as f:
         json.dump(data, f)
     os.replace(tmp, path)  # atomic: the board never reads a half-written file
@@ -126,7 +126,9 @@ def render() -> bool:
         "Legend: QUEUED = not started; WORKING = an agent is on it; DONE = agent finished, awaiting",
         "        lead review; INTEGRATED = reviewed, verified and pushed; BLOCKED = needs a decision.",
     ]
-    tmp = BOARD + ".tmp"
+    # The lead's watch loop and agents' `update` calls render concurrently; each process
+    # writes its own temp file, then atomically replaces the board.
+    tmp = f"{BOARD}.{os.getpid()}.tmp"
     with open(tmp, "w") as f:
         f.write("\n".join(lines) + "\n")
     os.replace(tmp, BOARD)

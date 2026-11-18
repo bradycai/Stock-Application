@@ -31,3 +31,5 @@ PROGRESS.txt
 
 # Claude Code agent worktrees (isolated per-issue checkouts)
 .claude/worktrees/
+.progress/*.tmp
+PROGRESS.txt.*.tmp

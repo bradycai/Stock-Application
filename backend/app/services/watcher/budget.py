@@ -1,4 +1,4 @@
-"""Watcher spend limits, from the `llm_calls` ledger (estimated list-price cost).
+"""Per-role (watcher / research) spend limits, from the `llm_calls` ledger (estimated list-price cost).
 
 Daily = since 00:00 UTC today, monthly = since the 1st of the UTC month. A call is allowed
 only if spend so far plus a conservative estimate of the call stays within BOTH ceilings.
@@ -39,14 +39,21 @@ def spend_since(db: Session, role: str, since: datetime) -> float:
     return float(total or 0.0)
 
 
+def limits(role: str) -> tuple[float, float]:
+    """(daily, monthly) USD ceilings for a role. Unknown roles get the watcher's (strictest)."""
+    if role == "research":
+        return settings.research_daily_budget_usd, settings.research_monthly_budget_usd
+    return settings.watcher_daily_budget_usd, settings.watcher_monthly_budget_usd
+
+
 def status(db: Session, role: str = "watcher", now: datetime | None = None) -> BudgetStatus:
     now = now or datetime.now(timezone.utc)
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return BudgetStatus(
         daily_spent=spend_since(db, role, day),
         monthly_spent=spend_since(db, role, day.replace(day=1)),
-        daily_limit=settings.watcher_daily_budget_usd,
-        monthly_limit=settings.watcher_monthly_budget_usd,
+        daily_limit=limits(role)[0],
+        monthly_limit=limits(role)[1],
     )
 
 

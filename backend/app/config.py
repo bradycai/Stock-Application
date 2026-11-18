@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     research_model: str = "claude-sonnet-5-5"
     research_effort: str = "medium"
     research_max_tokens: int = 8000
+    # Research worker
+    research_worker_enabled: bool = False
+    research_worker_interval_seconds: int = 30    # poll interval for queued research jobs
+    research_bundle_ttl_minutes: int = 120        # a bundle not strategized by then expires
+    research_daily_budget_usd: float = 5.0        # estimated research-role spend ceiling per UTC day
+    research_monthly_budget_usd: float = 75.0     # ... and per UTC month
     watcher_model: str = "claude-haiku-5-5"
     watcher_effort: str = "low"
     watcher_max_tokens: int = 4000

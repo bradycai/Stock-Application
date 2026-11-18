@@ -219,6 +219,24 @@ python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 202
   ratio, win rate, average win/loss, expectancy, trades, turnover, exposure, a bootstrap
   95% interval for the mean trade return, and a breakdown by market regime.
 
+## Adaptive risk policies
+
+`app/services/risk_policies.py` runs after the hard rules in `risk.py` — in analysis, in the
+monitor, and again with fresh account data right before a buy is submitted. It can only
+**shrink** a buy or **reject** it; sells, watch and avoid pass through untouched, and the
+hard rules are unchanged (a randomized property test checks this on 1,500 cases).
+
+- **Risk-budget sizing:** stop distance × position size ≤ `RISK_PER_TRADE_PCT` of equity, and
+  smaller still when volatility (ATR) is high; never above `MAX_POSITION_PCT`.
+- **Portfolio caps:** gross exposure and per-sector exposure, counting open positions, open
+  buy orders and earlier buys in the same run.
+- **Correlation:** reject a buy that moves with too many current holdings.
+- **Liquidity:** minimum average daily dollar volume; position ≤ a % of it.
+- **Fail closed:** missing or stale price history, an unknown position value, a failed
+  sector or correlation lookup, or any policy error rejects the buy with a clear code
+  (`ILLIQUID`, `EXPOSURE_UNKNOWN`, `CORRELATION_UNKNOWN`, `SECTOR_UNKNOWN`, `RISK_POLICY_ERROR`).
+  Size reductions are recorded in the audit trail.
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

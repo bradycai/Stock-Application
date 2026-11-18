@@ -15,11 +15,11 @@ from sqlalchemy.orm import Session
 
 from app.logging_config import log_event, safe_error
 from app.models import Order, OrderFill, TradeOutcome
-from app.services import broker, outcomes
+from app.services import broker, exits, outcomes
 
 logger = logging.getLogger("trading.order_sync")
 
-TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected", "replaced"}
+TERMINAL_STATUSES = {"filled", "canceled", "expired", "rejected", "replaced", "missing_at_broker"}
 
 
 def _norm_status(status) -> str:
@@ -114,7 +114,10 @@ def _apply_outcomes(db: Session, order: Order, details: dict, status: str) -> No
                                    reason=_exit_reason_for_leg(leg))
                     break
 
-    elif order.side == "sell" and status == "filled" and price:
+    elif order.side == "sell" and status == "filled" and price \
+            and not exits.is_partial_exit(order.exit_reason, order.raw):
+        # A partial trim (profit ladder / Claude trim) leaves shares held: it must not close
+        # the trade outcome. Only a full exit does.
         outcome = _open_outcome(db, order.symbol)
         if outcome is not None and (outcome.entry_ts is None or filled_ts >= _aware(outcome.entry_ts)):
             _close_outcome(db, outcome, exit_price=price, exit_ts=filled_ts, exit_order_id=order.id,

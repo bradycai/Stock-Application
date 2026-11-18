@@ -174,8 +174,27 @@ and ideas that were rejected or never traded:
   have returned over 1, 5 and 20 trading days using one fixed rule (`fwd-close-v1`) and stored
   daily bars, so rejected ideas can be compared with executed ones.
 - Read it at `GET /journal/trades` and `GET /journal/candidates`.
-- Known gap: positions closed with a direct close-position call (the monitor's exits) have no
-  order record yet, so their outcomes stay open until broker reconciliation lands (PR 07).
+- Exits the monitor sends (trailing stop, partial profit, Claude sell/trim, stop/take
+  backstop, daily-loss liquidation) are recorded as `monitor-exit` intents with an order row,
+  so their fills close the outcome too; partial exits (by quantity) leave it open.
+
+## Execution controls and reconciliation
+
+- **Every order path is serialized on its intent row** (manual approval, analysis
+  auto-execute, monitor auto-buy): the row is locked and its status re-checked, and each intent
+  has one deterministic `client_order_id`, so a repeated request can never submit twice. If a
+  submit call errors, the broker is asked for that id first — an order it accepted anyway is
+  recorded instead of being marked failed.
+- **Buys need fresh data:** right before submitting a buy, a new quote is fetched; the buy is
+  refused (the intent stays pending) if the quote is missing or stale while the market is open,
+  the limit is off-market, or market data / the broker can't be reached. Sells and protective
+  exits are never blocked by this.
+- **Kill switch** engagement also cancels open BUY orders at the broker (never sells or
+  protective legs), audited per order.
+- **Reconciliation** runs read-only every monitor cycle: managed positions the broker no longer
+  holds are closed, positions the database doesn't know are flagged, and orders the broker no
+  longer lists are reconciled — each only after two consecutive passes agree, so one empty or
+  glitchy broker response changes nothing. A requested sell is never assumed to have completed.
 
 ## Development workflow
 

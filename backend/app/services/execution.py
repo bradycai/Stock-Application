@@ -9,16 +9,16 @@ Keeping this in one place means manual approval and auto-trading share the exact
 risk re-validation and bracket-order submission. Manual approval behavior is unchanged.
 """
 import logging
-import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import audit
-from app.logging_config import log_event
+from app.logging_config import log_event, safe_error
 from app.models import IntentStatus, Order, TradeIntent
-from app.services import automation, broker, risk, risk_state
+from app.services import automation, broker, intent_validation, market_data, risk, risk_state, snapshots
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size
 
@@ -74,8 +74,61 @@ def expire_if_stale(db: Session, intent: TradeIntent) -> None:
                               f"{settings.intent_max_age_min}). Re-run the analysis for a fresh proposal.")
 
 
+def _block_entry(db: Session, intent: TradeIntent, actor: str, auto: bool, status_code: int,
+                 code: str, detail: str, extra: dict | None = None) -> None:
+    """Fail closed on a new entry: audit + log, leave the intent pending, raise."""
+    audit(db, "entry_blocked", actor, intent_id=intent.id,
+          payload={"ticker": intent.ticker, "auto": auto, "code": code, "reason": detail, **(extra or {})})
+    log_event(logger, "order.entry_blocked", logging.WARNING, intent_id=intent.id, ticker=intent.ticker,
+              actor=actor, auto=auto, code=code, reason=detail)
+    raise ExecutionError(status_code, f"New entry blocked ({code}): {detail}")
+
+
+def check_entry_data(db: Session, intent: TradeIntent, intent_dict: dict, actor: str, auto: bool) -> None:
+    """BUY only. Fetch a FRESH quote right before submitting and refuse the entry when the
+    quote is missing/stale, or the limit price is off-market. Any failure to get the data
+    refuses too (fail closed). Sells and protective exits never come through here."""
+    ticker = intent.ticker
+    try:
+        quote = market_data.fetch_snapshots([ticker]).get(ticker)
+        clock = market_data.market_clock()
+    except Exception as e:  # noqa: BLE001
+        _block_entry(db, intent, actor, auto, 503, "MARKET_DATA_UNAVAILABLE",
+                     f"could not fetch a fresh quote for {ticker}: {e}")
+    if not quote:
+        _block_entry(db, intent, actor, auto, 503, "NO_QUOTE", f"no fresh quote for {ticker}")
+    flags = snapshots.quality_flags(quote, market_open=clock.get("is_open"),
+                                    now=datetime.now(timezone.utc),
+                                    max_quote_age_sec=settings.max_quote_age_sec)
+    last_price = quote.get("last_price")
+    if not last_price:
+        _block_entry(db, intent, actor, auto, 409, "NO_MARKET_PRICE", f"no last price for {ticker}")
+    if flags["stale"]:
+        _block_entry(db, intent, actor, auto, 409, "STALE_QUOTE",
+                     f"quote for {ticker} is stale ({flags['quote_age_sec']}s old, max "
+                     f"{settings.max_quote_age_sec}s)", {"quote_age_sec": flags["quote_age_sec"]})
+    off = intent_validation.check_limit_price(intent_dict["limit_price"], last_price,
+                                              float(settings.max_limit_deviation_pct))
+    if off:
+        _block_entry(db, intent, actor, auto, 409, off[0]["code"], off[0]["message"],
+                     {"last_price": last_price, "limit_price": intent_dict["limit_price"]})
+
+
+def _lock_intent(db, intent) -> None:
+    """SELECT ... FOR UPDATE on the intent row (no-op for the non-SQLAlchemy fakes in tests)."""
+    if isinstance(db, Session):
+        db.refresh(intent, with_for_update=True)
+
+
 def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool = False) -> Order:
     """Re-validate risk and submit a bracket order. Caller commits afterward."""
+    # Serialize every path that can execute this intent (manual approve, analysis
+    # auto-execute, monitor auto-buy) on the intent row, and re-check its status under the
+    # lock: a second caller waits, then sees it is no longer pending.
+    _lock_intent(db, intent)
+    if intent.status != IntentStatus.pending_approval:
+        raise ExecutionError(409, f"Intent is {intent.status.value}, not awaiting execution")
+
     # 0. Fail closed on stale proposals: an intent is only valid for a short window after
     #    the market snapshot it was based on.
     expire_if_stale(db, intent)
@@ -102,6 +155,8 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
         account = broker.get_account()
         positions = broker.get_positions()
     except Exception as e:  # noqa: BLE001
+        if intent.action.value == "buy":  # fail closed on new entries, with an audit trail
+            _block_entry(db, intent, actor, auto, 502, "BROKER_UNAVAILABLE", f"Broker error: {e}")
         raise ExecutionError(502, f"Broker error: {e}")
     account["open_positions"] = len(positions)
     held_symbols = {p["symbol"] for p in positions}
@@ -133,6 +188,10 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
     intent.computed_notional = (
         float(result.computed_notional) if result.computed_notional else None
     )
+
+    # 2a. BUY only: fresh quote + limit sanity check immediately before submission.
+    if intent.action.value == "buy":
+        check_entry_data(db, intent, intent_dict, actor, auto)
 
     # 2b. SELL reconciliation: NEVER trust the intended/db/recommended quantity. Query the
     #     broker for the actual holding and sell at most that. Partial fills make any other
@@ -169,8 +228,15 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
         # Keep the recorded notional consistent with the (possibly clamped) sell qty.
         intent.computed_notional = round(sell_qty * float(intent.limit_price or 0), 2)
 
-    # 3. Submit a bracket order (idempotent via client_order_id)
-    client_order_id = f"intent-{intent.id}-{uuid.uuid4().hex[:8]}"
+    # 3. Submit a bracket order. The client_order_id is DETERMINISTIC per intent, so a
+    #    duplicate approve/auto request can never place a second order: the orders table
+    #    (unique client_order_id) and the broker both reject the repeat.
+    created = intent.created_at.timestamp() if intent.created_at else 0
+    client_order_id = f"intent-{intent.id}-{int(created)}"
+    if db.scalars(select(Order.id).where(Order.client_order_id == client_order_id)).first() is not None:
+        audit(db, "duplicate_submit_blocked", actor, intent_id=intent.id,
+              payload={"client_order_id": client_order_id, "ticker": intent.ticker})
+        raise ExecutionError(409, f"Intent {intent.id} already has an order; duplicate submit blocked")
     try:
         order_data = broker.submit_bracket_order(intent_dict, result.computed_qty, client_order_id)
     except broker.PositionAlreadyProtected as e:
@@ -179,9 +245,32 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
               payload={"ticker": intent.ticker, "reason": str(e)})
         raise ExecutionError(409, str(e))
     except Exception as e:  # noqa: BLE001
-        intent.status = IntentStatus.order_failed
-        audit(db, "order_error", "system", intent_id=intent.id, payload={"error": str(e)})
-        raise ExecutionError(502, f"Broker rejected order: {e}")
+        # The error may hide an order the broker DID accept (e.g. a timeout on the response).
+        # Look it up by our deterministic client_order_id before declaring failure.
+        accepted = broker.find_order_by_client_id(client_order_id)
+        if accepted is None or not accepted.get("broker_order_id"):
+            intent.status = IntentStatus.order_failed
+            audit(db, "order_error", "system", intent_id=intent.id, payload={"error": str(e)})
+            raise ExecutionError(502, f"Broker rejected order: {e}")
+        entry = float(intent_dict.get("limit_price") or 0)
+        stop_pct = float(intent_dict.get("stop_loss_percent") or 0)
+        order_data = {
+            "broker_order_id": accepted["broker_order_id"],
+            "symbol": accepted.get("symbol") or intent.ticker,
+            "side": accepted.get("side") or intent.action.value,
+            "qty": accepted.get("qty") or result.computed_qty,
+            "order_type": accepted.get("order_type") or "limit",
+            "limit_price": accepted.get("limit_price") or entry,
+            "stop_loss_price": round(entry * (1 - stop_pct / 100), 2)
+            if intent.action.value == "buy" and entry and stop_pct else None,
+            "take_profit_price": None, "status": accepted.get("status") or "accepted",
+            "raw": {"recovered_after_error": safe_error(e, 300), "broker": accepted},
+        }
+        audit(db, "order_submit_recovered", "system", intent_id=intent.id,
+              payload={"client_order_id": client_order_id,
+                       "broker_order_id": accepted["broker_order_id"], "error": safe_error(e, 300)})
+        log_event(logger, "order.submit_recovered", logging.WARNING, intent_id=intent.id,
+                  broker_order_id=accepted["broker_order_id"], client_order_id=client_order_id)
 
     order = Order(
         intent_id=intent.id,

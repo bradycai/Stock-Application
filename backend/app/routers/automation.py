@@ -5,9 +5,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import DB, Actor, audit
-from app.models import AuditLog
+from app.models import AuditLog, Order
 from app.schemas import AutomationEventOut, AutomationModeRequest, AutomationStatusOut, KillSwitchRequest
-from app.services import automation
+from app.services import automation, broker
 
 router = APIRouter(prefix="/automation", tags=["automation"])
 
@@ -76,15 +76,57 @@ def disable(db: Session = DB, actor: str = Actor):
     return _set_mode(db, "manual", actor)
 
 
-@router.post("/kill-switch", response_model=AutomationStatusOut)
+class KillSwitchOut(AutomationStatusOut):
+    """Status plus what engaging did to pending entry orders at the broker."""
+    canceled_buy_orders: list[dict] = []
+    cancel_failures: list[dict] = []
+    cancel_error: str | None = None
+
+
+def _cancel_pending_buys(db: Session, actor: str) -> dict:
+    """Best-effort cancel of pending BUY entry orders at the broker. Sell orders and
+    protective stop legs are never touched (the broker helper filters by side). One audit
+    row per order; any failure is reported, never raised."""
+    try:
+        result = broker.cancel_open_buy_orders()
+    except Exception as e:  # noqa: BLE001
+        result = {"canceled": [], "failed": [], "error": str(e)}
+    known = {}
+    for item in result["canceled"] + result["failed"]:
+        row = db.scalars(select(Order).where(Order.broker_order_id == item["broker_order_id"])).first()
+        known[item["broker_order_id"]] = row
+    for item in result["canceled"]:
+        row = known.get(item["broker_order_id"])
+        audit(db, "kill_switch_buy_canceled", actor, order_id=row.id if row else None,
+              intent_id=row.intent_id if row else None,
+              payload={"symbol": item["symbol"], "broker_order_id": item["broker_order_id"],
+                       "qty": item.get("qty"), "status_before": item.get("status")})
+    for item in result["failed"]:
+        row = known.get(item["broker_order_id"])
+        audit(db, "kill_switch_cancel_failed", actor, order_id=row.id if row else None,
+              intent_id=row.intent_id if row else None,
+              payload={"symbol": item["symbol"], "broker_order_id": item["broker_order_id"],
+                       "error": item.get("error")})
+    if result["error"]:
+        audit(db, "kill_switch_cancel_failed", actor, payload={"error": result["error"]})
+    return result
+
+
+@router.post("/kill-switch", response_model=KillSwitchOut)
 def kill_switch(req: KillSwitchRequest, db: Session = DB, actor: str = Actor):
     """Engage (blocks all automated orders and new buys; mode -> manual) or release it.
-    Releasing does not re-enable automation."""
+    Releasing does not re-enable automation. Engaging also cancels pending BUY entry orders
+    at the broker (best effort, audited per order); sells and protective legs are untouched."""
     automation.set_kill_switch(db, req.engaged, actor, req.reason)
     audit(db, "kill_switch_engaged" if req.engaged else "kill_switch_released", actor,
           payload={"reason": req.reason})
-    db.commit()
-    return _status(db)
+    db.commit()  # the switch is engaged before any broker call, whatever happens next
+    cancel = {"canceled": [], "failed": [], "error": None}
+    if req.engaged:
+        cancel = _cancel_pending_buys(db, actor)
+        db.commit()
+    return KillSwitchOut(**_status(db).model_dump(), canceled_buy_orders=cancel["canceled"],
+                         cancel_failures=cancel["failed"], cancel_error=cancel["error"])
 
 
 @router.get("/events", response_model=list[AutomationEventOut])

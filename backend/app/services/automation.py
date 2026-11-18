@@ -41,6 +41,9 @@ AUTOMATION_EVENTS = [
     "auto_order_blocked",
     "kill_switch_engaged",
     "kill_switch_released",
+    "kill_switch_buy_canceled",
+    "kill_switch_cancel_failed",
+    "entry_blocked",
 ]
 
 MODES = ("manual", "observe", "auto")

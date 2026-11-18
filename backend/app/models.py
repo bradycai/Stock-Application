@@ -118,6 +118,14 @@ class TradeIntent(Base):
     # Archiving hides an intent from the UI without a destructive delete (audit stays).
     archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Provenance (issue #4): which strategy/prompt proposed it, on what evidence and data.
+    strategy_id: Mapped[str | None] = mapped_column(String)
+    strategy_version: Mapped[str | None] = mapped_column(String)
+    evidence: Mapped[list | None] = mapped_column(JSONB)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    market_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("market_snapshots.id"))
+    prompt_version: Mapped[str | None] = mapped_column(String)
+
     run: Mapped["AnalysisRun"] = relationship(back_populates="intents")
     orders: Mapped[list["Order"]] = relationship(back_populates="intent")
 
@@ -353,3 +361,109 @@ class NewsEvent(Base):
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     classifier_version: Mapped[str] = mapped_column(String, nullable=False)
     extraction: Mapped[dict | None] = mapped_column(JSONB)
+
+
+# --------------------------------------------------------------------------- #
+# Trade journal (issue #4)                                                    #
+# --------------------------------------------------------------------------- #
+class SignalEvent(Base):
+    """A deterministic signal observed by the watcher; `event_key` dedupes repeats."""
+    __tablename__ = "signal_events"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    event_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String, index=True)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class OrderFill(Base):
+    """Append-only history of an order's broker state; a row is added only when the
+    (status, filled_qty, filled_avg_price) state changes, so repeated syncs don't duplicate."""
+    __tablename__ = "order_fills"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False, index=True)
+    broker_order_id: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    requested_qty: Mapped[int | None] = mapped_column(Integer)
+    filled_qty: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    filled_avg_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict | None] = mapped_column(JSONB)
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TradeOutcome(Base):
+    """Realized result of one executed trade (entry fill to exit fill), vs SPY."""
+    __tablename__ = "trade_outcomes"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    intent_id: Mapped[int] = mapped_column(ForeignKey("trade_intents.id"), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    entry_order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"), unique=True)
+    exit_order_id: Mapped[int | None] = mapped_column(ForeignKey("orders.id"))
+    entry_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    entry_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    exit_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_price: Mapped[float | None] = mapped_column(Numeric(18, 4))
+    qty: Mapped[int] = mapped_column(Integer, nullable=False)
+    realized_pnl: Mapped[float | None] = mapped_column(Numeric(18, 2))
+    realized_pnl_pct: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    holding_days: Mapped[float | None] = mapped_column(Float)
+    exit_reason: Mapped[str | None] = mapped_column(String)
+    benchmark_symbol: Mapped[str] = mapped_column(String, default="SPY", nullable=False)
+    benchmark_return_pct: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    status: Mapped[str] = mapped_column(String, nullable=False)          # open | closed
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CandidateOutcome(Base):
+    """Hypothetical forward return of an intent (any status, incl. rejected/watch)."""
+    __tablename__ = "candidate_outcomes"
+    __table_args__ = (
+        UniqueConstraint("intent_id", "horizon_days", "rule_version", name="uq_candidate_outcomes_key"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    intent_id: Mapped[int] = mapped_column(ForeignKey("trade_intents.id"), nullable=False, index=True)
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    rule_version: Mapped[str] = mapped_column(String, nullable=False)
+    start_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    end_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    start_price: Mapped[float] = mapped_column(Float, nullable=False)
+    end_price: Mapped[float] = mapped_column(Float, nullable=False)
+    return_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    benchmark_return_pct: Mapped[float | None] = mapped_column(Float)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StrategyMetric(Base):
+    """Aggregated performance per strategy/version/window (computed in a later PR)."""
+    __tablename__ = "strategy_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    strategy_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    strategy_version: Mapped[str | None] = mapped_column(String)
+    window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewReport(Base):
+    """A periodic performance/decision review (generated in a later PR)."""
+    __tablename__ = "review_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    period_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    llm_run_id: Mapped[str | None] = mapped_column(String)

@@ -295,6 +295,33 @@ def get_order_status(broker_order_id: str) -> dict:
     }
 
 
+def _order_snapshot(order) -> dict:
+    def num(v):
+        return float(v) if v not in (None, "") else None
+    status = getattr(order.status, "value", order.status)
+    otype = getattr(getattr(order, "order_type", None), "value", getattr(order, "order_type", None))
+    side = getattr(getattr(order, "side", None), "value", getattr(order, "side", None))
+    return {
+        "broker_order_id": str(getattr(order, "id", "")),
+        "status": str(status),
+        "side": str(side) if side is not None else None,
+        "order_type": str(otype) if otype is not None else None,
+        "qty": int(float(order.qty)) if getattr(order, "qty", None) not in (None, "") else None,
+        "filled_qty": int(float(order.filled_qty or 0)),
+        "filled_avg_price": num(order.filled_avg_price),
+        "filled_at": getattr(order, "filled_at", None),
+    }
+
+
+def get_order_details(broker_order_id: str) -> dict:
+    """READ-ONLY order lookup for journaling: status, fill quantity/price/time and, for
+    bracket orders, the same fields for each child leg. Places or changes nothing."""
+    order = trading_client().get_order_by_id(broker_order_id)
+    details = _order_snapshot(order)
+    details["legs"] = [_order_snapshot(leg) for leg in (getattr(order, "legs", None) or [])]
+    return details
+
+
 # --------------------------------------------------------------------------- #
 # Position closing (used by the autonomous position monitor)                  #
 # --------------------------------------------------------------------------- #

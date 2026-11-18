@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import db_migrate
 from app.config import settings
 from app.logging_config import configure_logging, log_event
-from app.routers import analysis, automation, intents, orders, portfolio
+from app.routers import analysis, automation, intents, journal, orders, portfolio
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
 from app.routers import watchlist
@@ -66,3 +66,4 @@ app.include_router(orders.router)
 app.include_router(risk_router.router)
 app.include_router(automation.router)
 app.include_router(monitor_router.router)
+app.include_router(journal.router)

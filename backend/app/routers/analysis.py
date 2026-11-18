@@ -2,7 +2,7 @@
 import logging
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, HTTPException
 from sqlalchemy import select
@@ -223,6 +223,12 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
             confidence=ti.confidence,
             reason=ti.reason,
             risks=ti.risks,
+            strategy_id="claude-analysis",
+            strategy_version=usage["prompt_version"],
+            prompt_version=usage["prompt_version"],
+            evidence=list(ti.evidence or []),
+            market_snapshot_id=market_snapshot.id,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=settings.intent_max_age_min),
             risk_passed=passed,
             risk_violations=violations,
             computed_qty=result.computed_qty if passed else None,

@@ -46,6 +46,7 @@ from app.services import (
     broker,
     data_aggregator,
     intent_validation,
+    order_sync,
     position_manager,
     risk,
     risk_state,
@@ -743,6 +744,7 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
         stop_loss_percent=intent_dict["stop_loss_percent"],
         take_profit_percent=intent_dict["take_profit_percent"],
         confidence=decision.confidence, reason=decision.reason, risks="(continuous monitor)",
+        strategy_id="continuous-monitor", evidence=list(intent_dict["evidence"]),
         risk_passed=passed, risk_violations=violations,
         computed_qty=res.computed_qty if passed else None,
         computed_notional=float(res.computed_notional) if passed and res.computed_notional else None,
@@ -801,6 +803,13 @@ def get_status() -> dict:
 def check_once_safe() -> None:
     db = SessionLocal()
     token = run_id_var.set(f"monitor-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}")
+    try:
+        # Read-only journal sync; runs in every mode (it never places orders) and a
+        # failure here must not stop the monitor cycle.
+        order_sync.sync_orders(db)
+    except Exception as e:  # noqa: BLE001
+        db.rollback()
+        log_event(logger, "order_sync.cycle_failed", logging.WARNING, error=safe_error(e, 500))
     try:
         result = check_once(db)
         if not result.get("skipped"):

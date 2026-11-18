@@ -29,7 +29,8 @@ def list_trades(limit: int = 200, db: Session = DB, _actor: str = Actor):
         {
             "id": o.id, "intent_id": o.intent_id, "run_id": i.run_id,
             "market_snapshot_id": i.market_snapshot_id or run_snapshot_id,
-            "symbol": o.symbol, "strategy_id": i.strategy_id, "strategy_version": i.strategy_version,
+            "symbol": o.symbol, "side": i.action.value,
+            "strategy_id": i.strategy_id, "strategy_version": i.strategy_version,
             "prompt_version": i.prompt_version, "status": o.status,
             "entry_order_id": o.entry_order_id, "exit_order_id": o.exit_order_id,
             "entry_ts": o.entry_ts, "entry_price": _f(o.entry_price),

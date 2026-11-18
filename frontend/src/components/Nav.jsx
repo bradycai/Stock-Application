@@ -4,6 +4,7 @@ const TABS = [
   { key: "monitor", label: "Monitor" },
   { key: "history", label: "Rejected / History" },
   { key: "research", label: "Research" },
+  { key: "journal", label: "Journal" },
   { key: "usage", label: "Usage" },
   { key: "orders", label: "Orders" },
   { key: "settings", label: "Settings" },

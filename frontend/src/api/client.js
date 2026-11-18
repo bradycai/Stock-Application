@@ -62,5 +62,8 @@ export const api = {
   getRunQuality: (id) => request(`/research/runs/${id}/quality`),
   getSnapshot: (id) => request(`/analysis/snapshots/${id}`),
   getLlmUsage: (days = 7) => request(`/llm/usage?days=${days}`),
+  getJournalTrades: (limit = 200) => request(`/journal/trades?limit=${limit}`),
+  getJournalCandidates: () => request("/journal/candidates"),
+  syncJournal: () => request("/journal/sync", { method: "POST" }),
   getLlmCalls: (limit = 50) => request(`/llm/calls?limit=${limit}`),
 };

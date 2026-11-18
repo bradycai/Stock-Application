@@ -137,17 +137,15 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
     #    parsed response is filtered so a run only ever produces intents for its tickers.
     usage = {"prompt_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "prompt_version": None}
 
+    batch_records: list[dict] = []
+
     def analyze_fn(batch_symbols: list[str]) -> list:
-        batch_set = set(batch_symbols)
-        batch_context = {
-            **context,
-            # only show positions that ARE in this batch, so Claude isn't tempted to
-            # act on unrelated holdings.
-            "positions": [p for p in context["positions"] if p["symbol"] in batch_set],
-            "watchlist_data": {s: context["watchlist_data"][s] for s in batch_symbols
-                               if s in context["watchlist_data"]},
-        }
-        output, meta, ok = analyst.analyze_batch(batch_context, allowed_tickers=batch_set)
+        # Only this batch's tickers and positions, so Claude isn't tempted to act on
+        # unrelated holdings. The same function rebuilds it from the snapshot on replay.
+        batch_context = snapshots.batch_context(context, batch_symbols)
+        batch_records.append({"symbols": list(batch_symbols),
+                              "context_hash": snapshots.content_hash(batch_context)})
+        output, meta, ok = analyst.analyze_batch(batch_context, allowed_tickers=set(batch_symbols))
         usage["prompt_tokens"] += meta.get("input_tokens", 0) + meta.get("cache_read_tokens", 0) \
             + meta.get("cache_write_tokens", 0)
         usage["output_tokens"] += meta.get("output_tokens", 0)
@@ -175,6 +173,9 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
                        "prompt_version": usage["prompt_version"],
                        "estimated_cost_usd": round(usage["cost_usd"], 6),
                        "data_as_of": data_as_of.isoformat(), "data_age_sec": round(data_age_sec, 1),
+                       # Replay: snapshots.batch_context(snapshot.data, symbols) rebuilds each
+                       # batch exactly; its hash must equal context_hash.
+                       "batches_sent": batch_records,
                        **batch_stats},
         raw_response={"intents": [i.model_dump() for i in merged]},
     )

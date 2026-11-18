@@ -13,9 +13,17 @@ def _intent(**over):
     return base
 
 
-def _codes(intent, last_price=100.0, age=10.0):
+GOOD_QUALITY = {"stale": False, "incomplete": False, "missing": []}
+
+
+def _codes(intent, last_price=100.0, age=10.0, quality=GOOD_QUALITY):
     return [v["code"] for v in validate_intent(intent, last_price=last_price, data_age_sec=age,
-                                               max_data_age_sec=600, max_limit_deviation_pct=10)]
+                                               max_data_age_sec=600, max_limit_deviation_pct=10,
+                                               quality=quality)]
+
+
+def test_missing_quality_flags_fail_closed():
+    assert "NO_DATA_QUALITY" in _codes(_intent(), quality=None)
 
 
 def test_well_formed_buy_passes():

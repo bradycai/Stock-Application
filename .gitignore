@@ -24,3 +24,7 @@ backend/backups/
 
 # Tooling caches
 .ruff_cache/
+
+# Agent progress board (local only)
+.progress/
+PROGRESS.txt

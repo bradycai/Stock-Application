@@ -35,6 +35,8 @@ def validate_intent(intent: dict, *, last_price: float | None, data_age_sec: flo
         return []
 
     violations: list[dict] = []
+    if quality is None:
+        violations.append(_v("NO_DATA_QUALITY", "no data-quality flags for this symbol"))
     if quality and quality.get("stale"):
         violations.append(_v("STALE_QUOTE", f"quote was {quality.get('quote_age_sec')}s old while the "
                                             "market was open"))

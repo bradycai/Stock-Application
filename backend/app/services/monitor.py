@@ -157,6 +157,12 @@ def _snapshot(symbol, mdata, position, order) -> dict:
     }
 
 
+def _news_items(mdata, limit: int = 3) -> list[dict]:
+    """The newest news items for the model: citable id, headline, event type, is_new."""
+    return [{k: n.get(k) for k in ("id", "headline", "event_type", "is_new", "published_at")}
+            for n in ((mdata or {}).get("news") or [])[:limit]]
+
+
 def _compact_payload(symbol, snap, mdata, position, fired):
     ind = (mdata or {}).get("indicators") or {}
     return {
@@ -174,7 +180,8 @@ def _compact_payload(symbol, snap, mdata, position, fired):
         },
         "stop_price": snap["stop_price"], "take_price": snap["take_price"],
         "triggers": [t.as_dict() for t in fired],
-        "news": [n.get("title") for n in ((mdata or {}).get("news") or [])[:2]],
+        "news": _news_items(mdata),
+        "quality": (mdata or {}).get("quality"),
         "max_position_pct": float(settings.max_position_pct),
     }
 
@@ -342,6 +349,7 @@ def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
     data_as_of = datetime.now(timezone.utc)
     try:
         context, _acct = data_aggregator.build_context(monitored, db=db, run_id=run_id_var.get())
+        db.commit()  # persist news/bars/quotes now, so a per-symbol rollback can't orphan news ids
     except Exception as e:  # noqa: BLE001
         counts["errors"] += 1
         audit(db, "monitor_error", "monitor", payload={"error": f"data: {e}"})
@@ -377,7 +385,8 @@ def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
         audit(db, "monitor_trigger", "monitor",
               payload={"symbol": symbol, "triggers": [t.as_dict() for t in fired]})
 
-        decision, meta, ok = analyst.monitor_decision(_compact_payload(symbol, snap, mdata, position, fired))
+        model_input = _compact_payload(symbol, snap, mdata, position, fired)
+        decision, meta, ok = analyst.monitor_decision(model_input)
         counts["claude_calls"] += 1
         if not ok or decision is None:
             counts["errors"] += 1
@@ -388,7 +397,9 @@ def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
         conf_pct = decision.confidence * 100
         audit(db, "monitor_decision", "monitor",
               payload={"symbol": symbol, "action": decision.action,
-                       "confidence": round(conf_pct, 1), "reason": decision.reason})
+                       "confidence": round(conf_pct, 1), "reason": decision.reason,
+                       "prompt_version": meta.get("prompt_version"), "model": meta.get("served_model"),
+                       "input": model_input})
 
         plan, why = plan_monitor_action(
             decision.action, conf_pct, auto_sell_conf, auto_buy_conf,
@@ -588,7 +599,8 @@ def _position_payload(symbol, pm, position, mdata, trigs) -> dict:
             "sma_20": ind.get("sma_20"), "sma_50": ind.get("sma_50"), "sma_200": ind.get("sma_200"),
             "return_5d_pct": ind.get("return_5d_pct"), "return_20d_pct": ind.get("return_20d_pct"),
         },
-        "news": [n.get("title") for n in ((mdata or {}).get("news") or [])[:2]],
+        "news": _news_items(mdata),
+        "quality": (mdata or {}).get("quality"),
         "triggers": trigs,
     }
 
@@ -656,7 +668,8 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
 
     counts["triggers"] += len(trigs)
     audit(db, "monitor_trigger", "monitor", payload={"symbol": symbol, "triggers": trigs, "held": True})
-    decision, meta, ok = analyst.position_review(_position_payload(symbol, pm, position, mdata, trigs))
+    model_input = _position_payload(symbol, pm, position, mdata, trigs)
+    decision, meta, ok = analyst.position_review(model_input)
     counts["claude_calls"] += 1
     if not ok or decision is None:
         counts["errors"] += 1
@@ -671,7 +684,8 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
     pm.last_analyzed_at = now
     audit(db, "monitor_decision", "monitor",
           payload={"symbol": symbol, "action": decision.action, "confidence": round(conf_pct, 1),
-                   "reason": decision.reason, "held": True})
+                   "reason": decision.reason, "held": True, "prompt_version": meta.get("prompt_version"),
+                   "model": meta.get("served_model"), "input": model_input})
 
     outcome = position_manager.decide_exit(decision.action, conf_pct, float(settings.ai_exit_confidence))
     if outcome == "sell":

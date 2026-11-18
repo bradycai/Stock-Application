@@ -118,7 +118,9 @@ def market_clock(ttl_sec: float = 60) -> dict:
                  "next_open": _iso(c.next_open), "next_close": _iso(c.next_close)}
     except Exception as e:  # noqa: BLE001
         log_event(logger, "data.clock_failed", logging.WARNING, error=safe_error(e))
-        value = {"is_open": None, "timestamp": None, "next_open": None, "next_close": None}
+        # Unknown market state; not cached, so the next call retries. Quality flags treat
+        # unknown as open (fail closed).
+        return {"is_open": None, "timestamp": None, "next_open": None, "next_close": None}
     _clock_cache["v"] = (time.monotonic(), value)
     return value
 

@@ -126,16 +126,18 @@ def _fundamentals(symbol: str) -> dict:
     return {"earnings_date": None, "analyst_actions": None}
 
 
-def _context_news(articles: list[dict], tickers: list[str], db: Session | None, run_id: str | None) -> dict:
+def _context_news(articles: list[dict], tickers: list[str], db: Session | None,
+                  run_id: str | None) -> tuple[dict, bool]:
     """Per-symbol news items for the model: stored + deduplicated with a DB session,
-    otherwise deduplicated in memory (no ids)."""
+    otherwise deduplicated in memory (no ids). Returns (by_symbol, ok); ok=False means news
+    could not be loaded, which is flagged as missing rather than shown as "no news"."""
     if db is not None:
         try:
             with db.begin_nested():  # a failure rolls back only the news ingest
                 by_symbol = news_store.ingest_news(db, articles, run_id)
         except Exception as e:  # noqa: BLE001 - news must not break the run
             log_event(logger, "data.news_store_failed", logging.WARNING, error=safe_error(e))
-            by_symbol = {}
+            return {s: [] for s in tickers}, False
     else:
         by_symbol, seen = {}, set()
         for a in articles:
@@ -150,7 +152,7 @@ def _context_news(articles: list[dict], tickers: list[str], db: Session | None, 
             for s in a.get("symbols") or []:
                 by_symbol.setdefault(s, []).append(item)
     cap = settings.news_per_symbol
-    return {s: (by_symbol.get(s) or [])[:cap] for s in tickers}
+    return {s: (by_symbol.get(s) or [])[:cap] for s in tickers}, True
 
 
 def build_context(tickers: list[str], *, db: Session | None = None,
@@ -172,7 +174,7 @@ def build_context(tickers: list[str], *, db: Session | None = None,
     if settings.news_api_key:
         covered = {s for a in articles for s in a.get("symbols") or []}
         articles += _newsapi_articles([t for t in tickers if t not in covered], settings.news_per_symbol)
-    news = _context_news(articles, tickers, db, run_id)
+    news, news_ok = _context_news(articles, tickers, db, run_id)
 
     now = datetime.now(timezone.utc)
     market = {}
@@ -186,6 +188,7 @@ def build_context(tickers: list[str], *, db: Session | None = None,
             "indicators": _technical_indicators(bars.get(symbol) or []),
             "fundamentals": _fundamentals(symbol),
             "news": news.get(symbol, []),
+            **({} if news_ok else {"news_unavailable": True}),
         }
         entry["quality"] = snapshots.quality_flags(entry, market_open=clock["is_open"], now=now,
                                                    max_quote_age_sec=settings.max_quote_age_sec)

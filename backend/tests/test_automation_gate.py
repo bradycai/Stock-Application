@@ -233,6 +233,7 @@ def test_continuous_cycle_isolates_a_failing_symbol(monkeypatch, no_broker):
     monkeypatch.setattr(broker, "get_open_order_symbols", lambda: [])
     monkeypatch.setattr(monitor.risk_state, "is_halted", lambda db, acct: (False, None))
     market = {s: {"last_price": 100.0, "intraday_change_pct": 0.0, "news": [],
+                  "quality": {"stale": False, "incomplete": False, "missing": []},
                   "indicators": {"relative_volume": 3.0, "rsi_14": 55, "macd": {"histogram": 0.1}}}
               for s in ("AAPL", "BOOM")}
     monkeypatch.setattr(monitor.data_aggregator, "build_context",
@@ -255,7 +256,8 @@ def test_continuous_cycle_isolates_a_failing_symbol(monkeypatch, no_broker):
     counts = monitor._run_continuous(db, account, [], _gate(mode="observe"))
 
     assert counts["errors"] == 1 and counts["ignored"] == 1
-    assert events[:2] == ["commit", "rollback"]  # AAPL committed before BOOM failed
+    # data writes committed, then AAPL committed, then only BOOM rolled back
+    assert events[:3] == ["commit", "commit", "rollback"]
     intents = [a for a in added if type(a).__name__ == "TradeIntent"]
     assert len(intents) == 1 and intents[0].status == IntentStatus.pending_approval
     assert any(getattr(a, "event_type", "") == "observe_would_execute" for a in added)

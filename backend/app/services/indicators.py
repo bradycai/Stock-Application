@@ -112,9 +112,11 @@ def technical_indicators(bars: list) -> dict:
     return_20d = round((closes[-1] / closes[-21] - 1) * 100, 2) if len(closes) >= 21 else None
     return_60d = round((closes[-1] / closes[-61] - 1) * 100, 2) if len(closes) >= 61 else None
 
+    last_ts = getattr(bars[-1], "timestamp", None)
     return {
         "history_days": history_days,
         "data_sufficient": True,
+        "last_bar_ts": last_ts.isoformat() if last_ts else None,
         "last_close": round(last_close, 2),
         "sma_20": sma(closes, 20),
         "sma_50": sma(closes, 50),

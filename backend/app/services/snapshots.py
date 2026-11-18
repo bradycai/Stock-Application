@@ -23,6 +23,7 @@ from app.models import LatestQuote, MarketBar, MarketSnapshot
 from app.services import market_data
 
 INDICATOR_FIELDS = ("sma_20", "sma_50", "sma_200", "rsi_14", "macd", "atr_14", "relative_volume")
+MAX_HISTORY_GAP_DAYS = 4
 # PostgreSQL allows at most 65,535 bind parameters per statement; bars have 13 columns.
 BAR_ROWS_PER_INSERT = 2000
 
@@ -55,10 +56,19 @@ def quality_flags(data: dict, *, market_open: bool | None, now: datetime, max_qu
 
     stamps = [t for t in (_parse_ts(data.get("quote_ts")), _parse_ts(data.get("last_trade_ts"))) if t]
     age = (now - max(stamps)).total_seconds() if stamps else None
-    stale = bool(market_open) and (age is None or age > max_quote_age_sec)
+    # Fail closed: an UNKNOWN market state (clock unavailable) is treated like an open market.
+    stale = market_open is not False and (age is None or age > max_quote_age_sec)
+
+    # Price history that ends days ago makes every indicator stale (weekends + holidays
+    # span at most 4 calendar days).
+    last_bar = _parse_ts(ind.get("last_bar_ts"))
+    if ind.get("data_sufficient") and last_bar and (now - last_bar).days > MAX_HISTORY_GAP_DAYS:
+        missing.append("recent_price_history")
+    if data.get("news_unavailable"):
+        missing.append("news")
     return {
         "stale": stale,
-        "incomplete": "last_price" in missing or "price_history" in missing,
+        "incomplete": bool({"last_price", "price_history", "recent_price_history"} & set(missing)),
         "missing": missing,
         "quote_age_sec": round(age, 1) if age is not None else None,
         "market_open": market_open,
@@ -84,6 +94,19 @@ def save_snapshot(db: Session, *, purpose: str, run_id: str | None, as_of: datet
     db.add(snap)
     db.flush()
     return snap
+
+
+def batch_context(context: dict, batch_symbols: list[str]) -> dict:
+    """The exact context one analysis batch sends to the model: the snapshot narrowed to the
+    batch's symbols and to positions in those symbols. Used both when the batch runs and
+    when it is replayed from a stored snapshot, so the two are identical by construction."""
+    batch_set = set(batch_symbols)
+    return {
+        **context,
+        "positions": [p for p in context.get("positions") or [] if p["symbol"] in batch_set],
+        "watchlist_data": {s: context["watchlist_data"][s] for s in batch_symbols
+                           if s in (context.get("watchlist_data") or {})},
+    }
 
 
 def load_context(db: Session, snapshot_id: int) -> dict | None:

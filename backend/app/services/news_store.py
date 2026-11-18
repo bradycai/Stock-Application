@@ -15,10 +15,11 @@ The model sees each item as `news:<id>` so it can cite the exact article as evid
 News text is DATA — never instructions — wherever it is used.
 """
 import hashlib
+import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -61,11 +62,16 @@ def _normalize(headline: str) -> str:
 
 def dedup_hash(headline: str, published_at: datetime | str | None) -> str:
     """Same normalized headline on the same UTC day = the same story."""
+    ts = published_at
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            ts = None
     day = ""
-    if isinstance(published_at, datetime):
-        day = published_at.date().isoformat()
-    elif isinstance(published_at, str):
-        day = published_at[:10]
+    if isinstance(ts, datetime):
+        ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        day = ts.astimezone(timezone.utc).date().isoformat()  # the same UTC day for every source
     return hashlib.sha256(f"{_normalize(headline)}|{day}".encode()).hexdigest()
 
 
@@ -128,7 +134,14 @@ def ingest_news(db: Session, articles: list[dict], run_id: str | None = None) ->
             continue
         merged = sorted(set(row.symbols or []) | symbols_by_hash[h])
         if merged != list(row.symbols or []):
-            row.symbols = merged  # a known story now also mentions more symbols
+            # A known story now also mentions more symbols. Merge in SQL so concurrent
+            # ingests (watcher + analysis) can't overwrite each other's additions.
+            db.execute(text(
+                "UPDATE news_events SET symbols = (SELECT jsonb_agg(DISTINCT s ORDER BY s) FROM "
+                "jsonb_array_elements_text(symbols || CAST(:add AS jsonb)) AS s) WHERE id = :id"
+            ), {"add": json.dumps(sorted(symbols_by_hash[h])), "id": row.id})
+            db.refresh(row)
+            merged = list(row.symbols)
         item = to_context_item(row, is_new=h in inserted)
         for s in merged:
             result.setdefault(s, []).append(item)

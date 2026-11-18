@@ -290,3 +290,80 @@ def test_a_failed_market_data_write_does_not_roll_back_stored_news(pg_db, fake_a
     ctx, _ = data_aggregator.build_context(["AAPL"], db=pg_db, run_id="r1")
     pg_db.commit()
     assert pg_db.query(NewsEvent).count() == 1 and ctx["watchlist_data"]["AAPL"]["news"][0]["is_new"] is True
+
+
+
+# --------------------------------------------------------------------------- #
+# Review regressions (PR 02)                                                  #
+# --------------------------------------------------------------------------- #
+def test_unknown_market_state_fails_closed_on_old_quotes():
+    old = _entry(quote_ts=(NOW - timedelta(minutes=10)).isoformat())
+    assert _flags(old, market_open=None)["stale"] is True
+    assert _flags(_entry(), market_open=None)["stale"] is False  # fresh quote is fine either way
+
+
+def test_history_that_ends_days_ago_is_incomplete():
+    ind = {**_entry()["indicators"], "last_bar_ts": (NOW - timedelta(days=9)).isoformat()}
+    q = _flags(_entry(indicators=ind), market_open=False)
+    assert q["incomplete"] is True and "recent_price_history" in q["missing"]
+    ok = {**ind, "last_bar_ts": (NOW - timedelta(days=3)).isoformat()}  # a long weekend is fine
+    assert _flags(_entry(indicators=ok), market_open=False)["incomplete"] is False
+
+
+def test_failed_news_load_is_flagged_missing_not_shown_as_no_news():
+    assert "news" in _flags(_entry(news_unavailable=True))["missing"]
+
+
+def test_failed_clock_call_is_not_cached(monkeypatch):
+    calls = []
+
+    def clock():
+        calls.append(1)
+        raise RuntimeError("timeout")
+    monkeypatch.setattr(market_data.broker, "trading_client", lambda: SimpleNamespace(get_clock=clock))
+    market_data.clear_caches()
+    assert market_data.market_clock()["is_open"] is None
+    market_data.market_clock()
+    assert len(calls) == 2
+
+
+def test_batch_context_replay_is_identical():
+    ctx = {"positions": [{"symbol": "AAPL"}, {"symbol": "TSLA"}], "market": {"open": True},
+           "watchlist_data": {"AAPL": {"last_price": 1}, "MSFT": {"last_price": 2},
+                              "TSLA": {"last_price": 3}}}
+    sent = snapshots.batch_context(ctx, ["AAPL", "MSFT"])
+    assert sent["positions"] == [{"symbol": "AAPL"}] and sorted(sent["watchlist_data"]) == ["AAPL", "MSFT"]
+    replayed = snapshots.batch_context(json_roundtrip(ctx), ["AAPL", "MSFT"])
+    assert snapshots.content_hash(replayed) == snapshots.content_hash(sent)
+
+
+def json_roundtrip(obj):
+    import json
+    return json.loads(json.dumps(obj, default=str))
+
+
+def test_dedup_day_key_is_the_same_utc_day_for_every_source():
+    late_pacific = "2026-11-17T20:30:00-08:00"  # = 2026-11-18 04:30 UTC
+    assert news_store.dedup_hash("Story", late_pacific) == news_store.dedup_hash(
+        "Story", datetime(2026, 11, 18, 4, 30, tzinfo=timezone.utc))
+
+
+def test_monitor_payload_carries_quality_and_citable_news():
+    from app.services import monitor
+    from app.services.triggers import Trigger
+    mdata = {"indicators": {}, "quality": {"stale": True},
+             "news": [{"id": "news:7", "headline": "Apple beats", "event_type": "earnings", "is_new": True}]}
+    snap = {"price": 100.0, "stop_price": None, "take_price": None}
+    payload = monitor._compact_payload("AAPL", snap, mdata, None, [Trigger("NEWS", "1 new headline")])
+    assert payload["quality"] == {"stale": True}
+    assert payload["news"][0]["id"] == "news:7" and payload["news"][0]["headline"] == "Apple beats"
+
+
+def test_known_story_gains_symbols_from_a_later_ingest(pg_db):
+    news_store.ingest_news(pg_db, [_article("1", "Chip stocks rally", ["NVDA"])], run_id="r1")
+    pg_db.commit()
+    later = news_store.ingest_news(pg_db, [_article("2", "Chip Stocks Rally", ["AMD"], source="newsapi")],
+                                   run_id="r2")
+    pg_db.commit()
+    row = pg_db.query(NewsEvent).one()
+    assert row.symbols == ["AMD", "NVDA"] and later["AMD"][0]["is_new"] is False

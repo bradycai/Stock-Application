@@ -603,3 +603,66 @@ class WatcherSymbolState(Base):
     last_action: Mapped[str | None] = mapped_column(String)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
                                                  onupdate=func.now())
+
+
+# --------------------------------------------------------------------------- #
+# Research pipeline (Phase 5 contract — app/services/research/contracts.py)   #
+# --------------------------------------------------------------------------- #
+class ResearchBundle(Base):
+    """One frozen, timestamped evidence bundle for one research job. Analysts and the
+    strategist only ever see this bundle, so every report and proposal is replayable."""
+    __tablename__ = "research_bundles"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    job_id: Mapped[int | None] = mapped_column(ForeignKey("research_jobs.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)              # INVESTIGATE | REVIEW_POSITION
+    status: Mapped[str] = mapped_column(String, nullable=False, default="collecting")
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    holding: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    market_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("market_snapshots.id"))
+    evidence: Mapped[dict] = mapped_column(JSONB, nullable=False)          # {id: EvidenceItem dict}
+    context: Mapped[dict] = mapped_column(JSONB, nullable=False)           # portfolio exposure, etc.
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leased_by: Mapped[str | None] = mapped_column(String)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class AnalystReportRow(Base):
+    __tablename__ = "analyst_reports"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("research_bundles.id"), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False)
+    analyst: Mapped[str] = mapped_column(String, nullable=False)
+    skill_version: Mapped[str | None] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False)            # ok | failed | rejected
+    report: Mapped[dict | None] = mapped_column(JSONB)                     # AnalystReport dict
+    error: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (UniqueConstraint("bundle_id", "analyst", name="uq_analyst_reports_bundle_analyst"),)
+
+
+class StrategyProposal(Base):
+    """Every strategist proposal — converted, rejected, abstained or expired alike."""
+    __tablename__ = "strategy_proposals"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("research_bundles.id"), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)            # see PROPOSAL_STATUSES
+    strategy_id: Mapped[str] = mapped_column(String, nullable=False, default="opus-strategist")
+    strategy_version: Mapped[str | None] = mapped_column(String)          # prompt/skill version
+    model: Mapped[str | None] = mapped_column(String)
+    confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    quote_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    proposal: Mapped[dict] = mapped_column(JSONB, nullable=False)          # StrategistProposal dict
+    validation: Mapped[dict] = mapped_column(JSONB, nullable=False)        # violations / notes
+    intent_id: Mapped[int | None] = mapped_column(ForeignKey("trade_intents.id"))

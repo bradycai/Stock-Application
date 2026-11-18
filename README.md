@@ -1,10 +1,16 @@
 # AI Trading Assistant
 
+[![CI](https://github.com/bradycai/Stock-Application/actions/workflows/ci.yml/badge.svg?branch=Production)](https://github.com/bradycai/Stock-Application/actions/workflows/ci.yml)
+
 A full-stack trading assistant that connects Claude to an Alpaca brokerage account
 through a controlled backend. **Claude never places trades.** It analyzes market data
 and returns structured JSON trade *intents*. A deterministic risk engine validates every
-intent, a human approves each one, and only then does the backend submit an order to
-Alpaca.
+intent, a human approves each one (unless automation is explicitly set to Auto), and only
+then does the backend submit an order to Alpaca.
+
+> This is an engineering project, not a promise of profitability or a recommendation to
+> trade real money. Keep `TRADING_MODE=paper` until the system has been independently
+> validated.
 
 ```
 React dashboard ──▶ FastAPI backend ──▶ Alpaca (paper → live)
@@ -56,6 +62,46 @@ Each layer has its own model and effort level (`backend/.env`):
 
 Every request is logged and written to the `llm_calls` table with tokens, estimated cost,
 model, prompt version and outcome.
+
+## Roadmap and status
+
+The app is evolving into a continuously running research system: Alpaca and research
+feeds → Haiku watcher → specialist analysts → Opus strategist → Python risk validation →
+Alpaca execution → trade journal and evaluation. Execution stays under deterministic
+control, and trading stays on paper until the system has been independently validated.
+
+| PR | Deliverable | Status |
+|----|-------------|--------|
+| 00 | GitHub protections, Dependabot, CI and Claude Code workflow | Done (in review) |
+| 01 | Startup, model routing, logging, schema validation, migrations (Phase 1) | Done (in review) |
+| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | In progress |
+| 03 | Journal schema and decision/outcome tracking | Planned |
+| 04 | Haiku watcher skill, worker, jobs, budget and heartbeats | Planned |
+| 05 | News, technical, fundamentals, macro and institutional analysts | Planned |
+| 06 | Opus strategy orchestration and enriched research UI | Planned |
+| 07 | Adaptive risk policies, broker reconciliation and controls | Planned |
+| 08 | Historical replay, evaluation and paper experiment reports | Planned |
+| 09 | Daily review, weekly optimization and automation dashboards | Planned |
+| 10 | Deployment, observability, recovery and final paper review | Planned |
+
+The first milestone is PRs 01–04: a safe, continuously running watcher that records
+evidence and triggers research jobs, with automated execution kept off while signal
+quality and cost are evaluated.
+
+## Development workflow
+
+- `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and
+  lands through pull requests; nothing is pushed to `Production` directly.
+- CI (`.github/workflows/ci.yml`) runs ruff, the pytest suite (with a throwaway Postgres
+  for migration tests) and the frontend build on every PR. It uses no secrets, and
+  Claude and Alpaca are mocked.
+- Changes to risk, execution, broker, automation, migrations, secrets templates or CI are
+  owned by `.github/CODEOWNERS` and need explicit human review.
+- Dependabot opens weekly dependency PRs; the Anthropic and Alpaca SDKs, SQLAlchemy,
+  psycopg and Alembic always arrive as separate PRs.
+- `CLAUDE.md` holds the rules for Claude Code in this repository (safety boundaries,
+  commands, definition of done); `.claude/agents/` and `.claude/skills/` define the
+  development agents and workflows (plan an issue, implement it, review a PR, fix CI).
 
 ## Project layout
 

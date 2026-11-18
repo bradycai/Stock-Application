@@ -2,11 +2,14 @@
 access. It returns schema-validated JSON trade intents via structured output.
 """
 import json
+import logging
 
 import anthropic
 
 from app.config import settings
 from app.schemas import AnalysisOutput, MonitorDecision, PositionDecision
+
+logger = logging.getLogger("trading.analysis")
 
 _client: anthropic.Anthropic | None = None
 
@@ -137,52 +140,85 @@ def _call_claude(messages: list, max_tokens: int):
     )
 
 
-def analyze_batch(context: dict, max_tokens: int = 4000) -> tuple[AnalysisOutput, dict, bool]:
-    """Analyze ONE batch of tickers. Robust to malformed JSON:
+def filter_to_allowed(output: AnalysisOutput, allowed: set[str]) -> tuple[AnalysisOutput, list[str]]:
+    """Drop any intent whose ticker is NOT in the analyzed batch. Claude sees portfolio
+    positions for context and can wander to other tickers; the analysis run must only
+    produce recommendations for the tickers actually requested. Returns (output, dropped)."""
+    if not allowed:
+        return output, []
+    allowed_u = {t.upper() for t in allowed}
+    kept, dropped = [], []
+    for it in output.intents:
+        if (it.ticker or "").upper() in allowed_u:
+            it.ticker = it.ticker.upper()
+            kept.append(it)
+        else:
+            dropped.append(it.ticker)
+    output.intents = kept
+    return output, dropped
 
-    1. Call Claude, strip fences, extract + parse + validate.
+
+def analyze_batch(context: dict, allowed_tickers=None, max_tokens: int = 4000
+                  ) -> tuple[AnalysisOutput, dict, bool]:
+    """Analyze ONE batch of tickers. The output is HARD-restricted to `allowed_tickers`
+    (the batch); intents for any other ticker are dropped. Robust to malformed JSON:
+
+    1. Call Claude, strip fences, extract + parse + validate, filter to allowed.
     2. On parse failure, retry ONCE with a JSON-repair prompt.
     3. On repeated failure, return ([], meta, ok=False) — caller skips the batch, no crash.
-
-    Returns (output, meta, ok). `ok=False` signals a failed batch.
     """
+    allowed = {t.upper() for t in (allowed_tickers or list((context.get("watchlist_data") or {}).keys()))}
     meta = {"model": settings.claude_model, "prompt_tokens": 0, "output_tokens": 0}
+    allowed_list = sorted(allowed)
     user = (
-        "Analyze the following market data and return trade intents as a single JSON "
-        f"object.\n\nHARD CAP: position_size_percent for every buy/sell MUST be <= "
+        "Analyze the market data below and return trade intents as a single JSON object.\n\n"
+        f"You MUST return an intent for EACH of these EXACT tickers and NO others: "
+        f"{allowed_list}. Do not return any ticker outside this list — not portfolio "
+        "holdings, not related names. If a ticker does not warrant a trade, still include "
+        'it with action \"watch\" (that is a valid analysis result, not a failure).\n\n'
+        f"HARD CAP: position_size_percent for every buy/sell MUST be <= "
         f"{float(settings.max_position_pct)}. Keep reason/risks each under {FIELD_LIMIT} "
         "chars.\n\n```json\n" + json.dumps(context, default=str) + "\n```"
     )
+    logger.info("[CLAUDE] sent batch=%s", allowed_list)
 
     try:
         resp = _call_claude([{"role": "user", "content": user}], max_tokens)
     except Exception as e:  # noqa: BLE001 - network/API error for this batch
+        logger.warning("[CLAUDE] error batch=%s: %s", allowed_list, e)
         return AnalysisOutput(intents=[]), {**meta, "error": str(e)}, False
 
     meta["prompt_tokens"] += resp.usage.input_tokens
     meta["output_tokens"] += resp.usage.output_tokens
     if resp.stop_reason == "refusal":
+        logger.warning("[CLAUDE] refusal batch=%s", allowed_list)
         return AnalysisOutput(intents=[]), {**meta, "error": "refusal"}, False
 
     raw_text = _extract_text(resp)
+    output = None
     try:
-        return _truncate(_parse_text(raw_text)), meta, True
+        output = _truncate(_parse_text(raw_text))
     except Exception:  # noqa: BLE001 - first parse failed; attempt repair
-        pass
+        repair_user = (
+            "The text below was supposed to be a single JSON object of the shape "
+            '{"intents": [...]} but did not parse. Return ONLY corrected valid JSON of that '
+            "exact shape — no prose, no fences.\n\n```\n" + (raw_text or "")[:6000] + "\n```"
+        )
+        try:
+            rresp = _call_claude([{"role": "user", "content": repair_user}], max_tokens)
+            meta["prompt_tokens"] += rresp.usage.input_tokens
+            meta["output_tokens"] += rresp.usage.output_tokens
+            output = _truncate(_parse_text(_extract_text(rresp)))
+        except Exception as e:  # noqa: BLE001 - repair failed; skip this batch
+            logger.warning("[CLAUDE] json_repair_failed batch=%s: %s", allowed_list, e)
+            return AnalysisOutput(intents=[]), {**meta, "error": f"json_repair_failed: {e}"}, False
 
-    # Repair attempt: hand the malformed text back and ask for valid JSON only.
-    repair_user = (
-        "The text below was supposed to be a single JSON object of the shape "
-        '{"intents": [...]} but did not parse. Return ONLY corrected valid JSON of that '
-        "exact shape — no prose, no fences.\n\n```\n" + (raw_text or "")[:6000] + "\n```"
-    )
-    try:
-        rresp = _call_claude([{"role": "user", "content": repair_user}], max_tokens)
-        meta["prompt_tokens"] += rresp.usage.input_tokens
-        meta["output_tokens"] += rresp.usage.output_tokens
-        return _truncate(_parse_text(_extract_text(rresp))), meta, True
-    except Exception as e:  # noqa: BLE001 - repair failed; skip this batch
-        return AnalysisOutput(intents=[]), {**meta, "error": f"json_repair_failed: {e}"}, False
+    logger.info("[CLAUDE] response received batch=%s tickers=%s",
+                allowed_list, [i.ticker for i in output.intents])
+    output, dropped = filter_to_allowed(output, allowed)
+    if dropped:
+        logger.warning("[VALIDATION] rejected out-of-batch tickers=%s (allowed=%s)", dropped, allowed_list)
+    return output, {**meta, "dropped": dropped}, True
 
 
 MONITOR_SYSTEM_PROMPT = """You are a position-monitoring trading analyst. A rule-based \

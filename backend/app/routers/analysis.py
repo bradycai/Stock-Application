@@ -1,4 +1,6 @@
 """Run an analysis: aggregate data -> Claude -> risk filter -> persist intents."""
+import logging
+
 from fastapi import APIRouter, Body, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,6 +29,8 @@ from app.services import (
 from app.services.execution import ExecutionError, execute_intent
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size, dedupe_by_ticker
+
+logger = logging.getLogger("trading.analysis")
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
 
@@ -59,11 +63,24 @@ def run_analysis(
     if not tickers:
         raise HTTPException(status_code=400, detail="No tickers; add to the watchlist or pick a universe")
 
+    logger.info("[ANALYSIS] run start tickers=%s universe=%s", tickers, req.universe)
+
     # 1. Aggregate market data for ALL candidates + capture account snapshot.
     try:
         context, account = data_aggregator.build_context(tickers)
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Data aggregation failed: {e}")
+
+    # [DATA] per-ticker success/failure (never silently drop a ticker).
+    for sym in tickers:
+        m = context["watchlist_data"].get(sym, {})
+        ind = m.get("indicators") or {}
+        if ind.get("data_sufficient"):
+            logger.info("[DATA] ticker=%s success last=%s history=%s",
+                        sym, m.get("last_price"), ind.get("history_days"))
+        else:
+            logger.warning("[DATA] ticker=%s FAILURE reason=%s last=%s",
+                           sym, ind.get("note", "insufficient data"), m.get("last_price"))
 
     snapshot = AccountSnapshot(
         equity=account["equity"],
@@ -81,18 +98,31 @@ def run_analysis(
     # 2. Quantitative prescreen: rank all candidates, keep only the top N for Claude.
     ranked = prescreener.rank_candidates(context["watchlist_data"], settings.prescreen_top_n)
     top_symbols = [r.symbol for r in ranked]
+    top_set = set(top_symbols)
+    for sym in tickers:
+        if sym in top_set:
+            logger.info("[SCREEN] ticker=%s passed (sent to Claude)", sym)
+        else:
+            logger.info("[SCREEN] ticker=%s rejected (outside prescreen top %d)",
+                        sym, settings.prescreen_top_n)
 
     # 3. Batch the top candidates through Claude (CLAUDE_BATCH_SIZE per call). A failed /
-    #    malformed batch is skipped (counted), never crashes the run.
+    #    malformed batch is skipped (counted), never crashes the run. Each batch is
+    #    HARD-restricted to its own tickers: positions are scoped to the batch and the
+    #    parsed response is filtered so a run only ever produces intents for its tickers.
     token_meta = {"prompt_tokens": 0, "output_tokens": 0}
 
     def analyze_fn(batch_symbols: list[str]) -> list:
+        batch_set = set(batch_symbols)
         batch_context = {
             **context,
+            # only show positions that ARE in this batch, so Claude isn't tempted to
+            # act on unrelated holdings.
+            "positions": [p for p in context["positions"] if p["symbol"] in batch_set],
             "watchlist_data": {s: context["watchlist_data"][s] for s in batch_symbols
                                if s in context["watchlist_data"]},
         }
-        output, meta, ok = analyst.analyze_batch(batch_context)
+        output, meta, ok = analyst.analyze_batch(batch_context, allowed_tickers=batch_set)
         token_meta["prompt_tokens"] += meta.get("prompt_tokens", 0)
         token_meta["output_tokens"] += meta.get("output_tokens", 0)
         if not ok:
@@ -159,6 +189,7 @@ def run_analysis(
 
         if ti.action in ("watch", "avoid"):
             # Non-actionable classifications: surfaced for the user, never executed.
+            # This is a valid analysis RESULT (not a failure) and is persisted/displayed.
             row.status = IntentStatus.recommended
         elif result.passed:
             row.status = IntentStatus.pending_approval
@@ -168,6 +199,15 @@ def run_analysis(
         db.add(row)
         db.flush()
         out_intents.append(row)
+
+        if result.passed or ti.action in ("watch", "avoid"):
+            logger.info("[VALIDATION] ticker=%s accepted action=%s status=%s conf=%.0f%%",
+                        ti.ticker, ti.action, row.status.value, float(ti.confidence or 0) * 100)
+        else:
+            logger.info("[VALIDATION] ticker=%s rejected reason=%s",
+                        ti.ticker, [v["code"] for v in result.as_violation_dicts()])
+        logger.info("[DATABASE] saved recommendation id=%s ticker=%s status=%s",
+                    row.id, ti.ticker, row.status.value)
 
         # Audit: recommendation, plus rejection if the risk engine blocked it
         audit(db, "recommendation", "claude", intent_id=row.id,
@@ -183,10 +223,17 @@ def run_analysis(
     # 5. Optional autonomous execution. Only runs when automation is ACTIVE
     #    (env capability + live confirmation when live + runtime switch ON). When
     #    inactive — the default — this is a no-op and everything stays manual.
-    active, _why = automation.auto_trading_active(db)
+    active, why = automation.auto_trading_active(db)
     if active:
         _auto_execute_eligible(db, out_intents)
+    else:
+        for row in out_intents:
+            logger.info("[AUTO-TRADE] ticker=%s skipped reason=%s", row.ticker, why)
 
+    logger.info("[ANALYSIS] run complete tickers_screened=%d sent=%d final_recommendations=%d "
+                "(this run only): %s",
+                len(tickers), len(top_symbols), len(out_intents),
+                [(i.ticker, i.action.value) for i in out_intents])
     return RunSummaryOut(
         tickers_screened=len(tickers),
         prescreen_top_n=len(top_symbols),
@@ -218,16 +265,19 @@ def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
                            "required_threshold": min_conf, "reason": why,
                            "rejected_by": category})
             db.commit()
+            logger.info("[AUTO-TRADE] ticker=%s skipped reason=%s (%s)", row.ticker, why, category)
             continue
         try:
             execute_intent(db, row, actor="automation", auto=True)
             db.commit()
+            logger.info("[AUTO-TRADE] ticker=%s executed", row.ticker)
         except ExecutionError as e:
             audit(db, "auto_trade_rejected", "automation", intent_id=row.id,
                   payload={"ticker": row.ticker, "confidence": round(confidence_pct, 1),
                            "required_threshold": min_conf, "reason": str(e.detail),
                            "rejected_by": "risk_engine", "violations": e.violations})
             db.commit()
+            logger.info("[AUTO-TRADE] ticker=%s skipped reason=%s", row.ticker, str(e.detail))
 
 
 @router.get("/runs/{run_id}")

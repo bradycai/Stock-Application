@@ -74,15 +74,15 @@ control, and trading stays on paper until the system has been independently vali
 |----|-------------|--------|
 | 00 | GitHub protections, Dependabot, CI and Claude Code workflow | Done (in review) |
 | 01 | Startup, model routing, logging, schema validation, migrations (Phase 1) | Done (in review) |
-| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | Done (in review); WebSocket streaming moves to PR 04 with the worker |
-| 03 | Journal schema and decision/outcome tracking | Next |
-| 04 | Haiku watcher skill, worker, jobs, budget and heartbeats | Planned |
-| 05 | News, technical, fundamentals, macro and institutional analysts | Planned |
-| 06 | Opus strategy orchestration and enriched research UI | Planned |
-| 07 | Adaptive risk policies, broker reconciliation and controls | Planned |
-| 08 | Historical replay, evaluation and paper experiment reports | Planned |
-| 09 | Daily review, weekly optimization and automation dashboards | Planned |
-| 10 | Deployment, observability, recovery and final paper review | Planned |
+| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | Done (in review) |
+| 03 | Journal schema and decision/outcome tracking; SEC EDGAR + FRED research data | Done (in review) |
+| 04 | Haiku watcher skill, worker, jobs, budget and heartbeats; WebSocket streaming | Done (in review) |
+| 05 | News, technical, fundamentals, macro and institutional analysts | Done (in review) |
+| 06 | Opus strategy orchestration and enriched research UI | Done (in review) |
+| 07 | Adaptive risk policies, broker reconciliation and controls | Done (in review) |
+| 08 | Historical replay, evaluation and paper experiment reports | Done (in review) |
+| 09 | Daily review, weekly optimization and automation dashboards | Done (in review) |
+| 10 | Deployment, observability, recovery and final paper review | Done (in review); the final paper review needs a live observe-mode run |
 
 The first milestone is PRs 01–04: a safe, continuously running watcher that records
 evidence and triggers research jobs, with automated execution kept off while signal
@@ -300,6 +300,39 @@ hard rules are unchanged (a randomized property test checks this on 1,500 cases)
   sector or correlation lookup, or any policy error rejects the buy with a clear code
   (`ILLIQUID`, `EXPOSURE_UNKNOWN`, `CORRELATION_UNKNOWN`, `SECTOR_UNKNOWN`, `RISK_POLICY_ERROR`).
   Size reductions are recorded in the audit trail.
+
+## Deployment and operations
+
+```bash
+export POSTGRES_PASSWORD=<choose one>        # required; there is no default
+docker compose up -d --build                 # postgres, migrate, api (:8000), frontend (:5173)
+docker compose --profile workers up -d       # opt in: stream, watcher, research, strategist, health
+```
+
+- Compose runs its **own** Postgres (published on `127.0.0.1:${POSTGRES_HOST_PORT:-5433}`, so
+  it doesn't collide with a local server on 5432) with a one-shot `migrate` job before the API
+  and workers start. Secrets come only from `backend/.env` at runtime; nothing is baked into
+  an image, every port binds to `127.0.0.1`, and `TRADING_MODE` is pinned to `paper`.
+- Plain `docker compose up` starts **no** worker, so nothing spends Claude budget until you
+  add `--profile workers`; each worker still enforces its own budget and the kill switch.
+- **Health:** `GET /health` (liveness) and `GET /health/ready` (database reachable and schema
+  at head; 503 otherwise). The API container's healthcheck uses `/health/ready`.
+- **System health watcher** (`HEALTH_WATCHER_ENABLED=true python -m app.workers.health_watcher`):
+  every `HEALTH_WATCHER_INTERVAL_SECONDS` it checks worker heartbeats, market-data freshness
+  during market hours, order rejects and submit errors, Claude spend against each role's
+  daily budget, the research-job backlog and failures, and reconciliation mismatches. It
+  writes deduplicated alerts to `system_alerts` (one active alert per problem, with a count)
+  and resolves them when the condition clears. It never calls the broker or Claude.
+- **Ops API:** `GET /ops/status` (workers, queue, data freshness, spend per role, open alerts,
+  recent redacted errors), `GET /ops/alerts`, `POST /ops/alerts/{id}/ack` (audited). Shown on
+  the dashboard's Operations tab.
+- **Retention:** `python -m app.services.ops.retention` is a dry run; `--apply` deletes.
+  Every `RETENTION_*_DAYS` defaults to 0 (keep forever). It only prunes resolved alerts,
+  heartbeats of retired workers, 1-minute bars, news and finished research jobs, and never
+  anything a snapshot, intent or bundle may need for replay. Audit, LLM, order and intent
+  history are never pruned.
+- **Recovery:** research jobs are leased, so a job held by a crashed worker is picked up
+  again when its lease expires; alerts are idempotent across watcher restarts.
 
 ## Development workflow
 

@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     claude_batch_size: int = 10         # tickers per Claude call
     max_final_recommendations: int = 30 # cap on merged recommendations returned
 
+    # Daily review
+    review_min_sample_size: int = 20    # groups with fewer closed trades are flagged insufficient
+    review_confidence_buckets: str = "0.5,0.6,0.7,0.8,0.9"  # lower bucket edges for calibration
+    review_llm_summary: bool = False    # optional Claude summary of aggregates (proposals only)
+
     # Optional data sources
     news_api_key: str = ""
 

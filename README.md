@@ -219,6 +219,28 @@ python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 202
   ratio, win rate, average win/loss, expectancy, trades, turnover, exposure, a bootstrap
   95% interval for the mean trade return, and a breakdown by market regime.
 
+## Daily review and strategy metrics
+
+```bash
+python -m app.services.review.run --date 2026-11-17            # daily
+python -m app.services.review.run --date 2026-11-17 --weekly   # 7 days ending on the date
+```
+
+Deterministic, read-only over the trade journal (no broker calls), idempotent per period:
+
+- **Performance:** realized and unrealized P&L, fees, slippage (fill vs limit), win rate,
+  average win/loss, expectancy, turnover and max drawdown, against SPY over the same period.
+- **Execution quality:** fill rate, rejected / canceled / expired / partial orders, and
+  submit-to-fill latency.
+- **Missed ideas:** rejected, watch and avoid ideas with their hypothetical outcomes.
+- **Strategy metrics** (`strategy_metrics`) grouped by strategy and version, market regime,
+  holding period, news event type and confidence bucket, with calibration (stated confidence
+  vs realized hit rate). Groups below `REVIEW_MIN_SAMPLE_SIZE` are flagged insufficient.
+- **Optional Claude summary** (`REVIEW_LLM_SUMMARY`, off by default) sees aggregates only; its
+  suggestions are stored as pending proposals and never change anything by themselves.
+- Read it at `GET /reviews`, `GET /reviews/{id}` and `GET /strategy-metrics`; record your
+  decision on suggestions with `POST /reviews/{id}/decision`.
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

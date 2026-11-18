@@ -251,3 +251,10 @@ body {
 .sample-low { color: var(--warn); font-weight: 600; }
 .journal-ids { white-space: nowrap; font-size: 11px; color: var(--muted); }
 .journal-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+
+/* --- performance & operations --- */
+.perf-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.perf-detail { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+.perf-list { margin: 0 0 10px; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; }
+.perf-decision { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.perf-chip { display: inline-block; margin-right: 10px; white-space: nowrap; }

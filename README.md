@@ -152,6 +152,29 @@ and ideas that were rejected or never traded:
 - Known gap: positions closed with a direct close-position call (the monitor's exits) have no
   order record yet, so their outcomes stay open until broker reconciliation lands (PR 07).
 
+## Backtesting
+
+`app/backtest/` replays strategies over stored daily bars (`market_bars`) with the same
+indicator, prescreen and risk logic the live app uses — no Claude calls:
+
+```bash
+python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 2026-11-13 \
+    --split holdout --out report.json          # or --split walk-forward / none
+```
+
+- **Point-in-time:** on simulated day *d* a strategy can only read bars up to *d*; reading
+  ahead raises an error (tested). About 420 days of warm-up history are loaded before `--start`.
+- **Fills:** signals at the close of *d*; limit orders fill on *d+1* at min(open, limit) plus
+  slippage, never above the limit; stops win ties with targets and gap fills use the open;
+  fills are capped at a share of bar volume; fees and slippage are configurable.
+- **Strategies:** a deterministic momentum baseline (top-N by the prescreener score, sized
+  by `risk.evaluate`) and buy-and-hold SPY; `ReplayStrategy` will replay cached AI signals.
+- **Splits:** chronological development / validation / holdout, or walk-forward. Parameters
+  are chosen on validation (or train) windows; the holdout runs once, last.
+- **Report:** net and benchmark-relative return, CAGR, max drawdown, volatility, Sharpe-like
+  ratio, win rate, average win/loss, expectancy, trades, turnover, exposure, a bootstrap
+  95% interval for the mean trade return, and a breakdown by market regime.
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

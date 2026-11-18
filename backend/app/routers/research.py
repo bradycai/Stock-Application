@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.deps import DB, Actor
-from app.models import AnalysisRun, MarketSnapshot, TradeIntent
+from app.models import AnalysisRun, AnalystReportRow, MarketSnapshot, ResearchBundle, TradeIntent
 
 router = APIRouter(prefix="/research", tags=["research"])
 
@@ -71,3 +71,48 @@ def run_quality(run_id: int, db: Session = DB, _actor: str = Actor):
             "no_quality_data": not q,
         })
     return {"run_id": run_id, "market_snapshot_id": snap.id, "symbols": symbols}
+
+
+# --------------------------------------------------------------------------- #
+# Research bundles (Phase 5): evidence + specialist analyst reports            #
+# --------------------------------------------------------------------------- #
+def _report_view(r: AnalystReportRow) -> dict:
+    return {"id": r.id, "analyst": r.analyst, "status": r.status, "model": r.model,
+            "skill_version": r.skill_version, "report": r.report, "error": r.error,
+            "created_at": r.created_at}
+
+
+def _bundle_summary(b: ResearchBundle, reports: list[AnalystReportRow]) -> dict:
+    return {"id": b.id, "created_at": b.created_at, "job_id": b.job_id, "symbol": b.symbol,
+            "kind": b.kind, "status": b.status, "as_of": b.as_of, "holding": b.holding,
+            "market_snapshot_id": b.market_snapshot_id, "ready_at": b.ready_at,
+            "expires_at": b.expires_at, "error": b.error, "evidence_count": len(b.evidence or {}),
+            "reports": {r.analyst: {"status": r.status, "stance": (r.report or {}).get("stance"),
+                                    "confidence": (r.report or {}).get("confidence")} for r in reports}}
+
+
+@router.get("/bundles")
+def list_bundles(status: str | None = None, symbol: str | None = None,
+                 limit: int = Query(20, ge=1, le=100), db: Session = DB, _actor: str = Actor):
+    q = select(ResearchBundle).order_by(ResearchBundle.id.desc()).limit(limit)
+    if status:
+        q = q.where(ResearchBundle.status == status)
+    if symbol:
+        q = q.where(ResearchBundle.symbol == symbol.upper())
+    bundles = db.scalars(q).all()
+    by_bundle: dict[int, list[AnalystReportRow]] = {b.id: [] for b in bundles}
+    if bundles:
+        for r in db.scalars(select(AnalystReportRow).where(AnalystReportRow.bundle_id.in_(list(by_bundle)))):
+            by_bundle[r.bundle_id].append(r)
+    return [_bundle_summary(b, by_bundle[b.id]) for b in bundles]
+
+
+@router.get("/bundles/{bundle_id}")
+def get_bundle(bundle_id: int, db: Session = DB, _actor: str = Actor):
+    b = db.get(ResearchBundle, bundle_id)
+    if not b:
+        raise HTTPException(404, "bundle not found")
+    reports = db.scalars(select(AnalystReportRow).where(AnalystReportRow.bundle_id == b.id)
+                         .order_by(AnalystReportRow.id)).all()
+    return {**_bundle_summary(b, list(reports)), "evidence": b.evidence, "context": b.context,
+            "analyst_reports": [_report_view(r) for r in reports]}

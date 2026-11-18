@@ -110,6 +110,24 @@ quality and cost are evaluated.
 - **Coverage:** the free IEX feed carries only part of US volume; the feed in use is
   recorded with every snapshot.
 
+## Research data
+
+Fundamentals, filings and macro data are fetched by a separate refresh command, never inside a
+web request, and stored with their period, filing (release) date and source:
+
+```bash
+python -m app.services.research_data.refresh --symbols AAPL,MSFT,NVDA
+```
+
+- **SEC EDGAR** (needs `SEC_USER_AGENT`): ticker → CIK, company SIC code mapped to a sector
+  (replacing the old 27-symbol table), recent 8-K/10-Q/10-K filings, and XBRL facts (revenue,
+  net income, diluted EPS, gross profit, operating income). Rate-limited to 5 requests/second.
+- **FRED** (needs `FRED_API_KEY`): 10-year and 2-year Treasury yields, fed funds, CPI,
+  unemployment and VIX, keeping each vintage for point-in-time backtests.
+- The model context reads only stored values: latest fundamentals and growth with their
+  dates, the sector, the last filing, and a `macro` block. Anything unavailable stays null
+  and is listed as missing.
+
 ## Trade journal
 
 Every proposal, order and outcome is linked so results can be measured, including losses

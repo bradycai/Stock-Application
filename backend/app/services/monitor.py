@@ -51,6 +51,8 @@ from app.services import (
     position_manager,
     reconcile,
     risk,
+    risk_policies,
+    risk_policy_data,
     risk_state,
     triggers,
 )
@@ -469,7 +471,9 @@ def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
             run_holder["run"] = run_holder["run"] or _get_monitor_run(db)
             data_age_sec = (datetime.now(timezone.utc) - data_as_of).total_seconds()
             row = _persist_buy_intent(db, run_holder["run"], symbol, decision, snap, mdata,
-                                      account, held, halted, fired=fired, data_age_sec=data_age_sec)
+                                      account, held, halted, fired=fired, data_age_sec=data_age_sec,
+                                      positions=positions,
+                                      market_open=(context.get("market") or {}).get("open"))
             if row.status == IntentStatus.rejected_by_risk:
                 counts["ignored"] += 1
                 audit(db, "monitor_ignored", "monitor",
@@ -750,7 +754,8 @@ def _manage_position(db, symbol: str, position: dict, mdata: dict, counts: dict)
 
 
 def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, halted, *,
-                        fired=(), data_age_sec: float = 0.0) -> TradeIntent:
+                        fired=(), data_age_sec: float = 0.0, positions=(),
+                        market_open: bool | None = None) -> TradeIntent:
     """Persist a monitor-proposed buy. It must pass the same fail-closed output checks as an
     analysis intent (fresh data, limit near market, sane stop/take, evidence) AND the risk
     engine to become pending_approval; otherwise it is stored as rejected_by_risk."""
@@ -775,6 +780,15 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
     )
     ri = build_risk_input(intent_dict, account, held, halted, mdata)
     res = risk.evaluate(ri)
+    # Adaptive policies after the hard rules: may only shrink the size (re-evaluated by
+    # risk.evaluate) or reject the entry.
+    policy_symbols = list(dict.fromkeys([symbol] + [p["symbol"] for p in positions]))
+    res, _policy_notes = risk_policies.apply(
+        intent_dict, ri, res, positions=positions,
+        market=risk_policy_data.market_from_indicators(mdata, market_open),
+        sector_of=risk_policy_data.sector_of(db, {symbol: (mdata or {}).get("sector")}),
+        returns_by_symbol=risk_policy_data.returns_by_symbol(db, policy_symbols))
+    size = float(intent_dict["position_size_percent"])
     passed = res.passed and not output_violations
     violations = output_violations + res.as_violation_dicts()
     row = TradeIntent(

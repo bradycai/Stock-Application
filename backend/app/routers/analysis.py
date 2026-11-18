@@ -30,6 +30,8 @@ from app.services import (
     prescreener,
     snapshots,
     risk,
+    risk_policies,
+    risk_policy_data,
     risk_state,
     universes,
 )
@@ -189,6 +191,15 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
 
     max_pct = float(settings.max_position_pct)
     out_intents: list[TradeIntent] = []
+
+    # Inputs for the adaptive risk policies (BUYs only; they can only shrink or reject).
+    positions_now = context["positions"]
+    buy_symbols = [i.ticker for i in merged if i.action == "buy"]
+    policy_returns = risk_policy_data.returns_by_symbol(
+        db, list(dict.fromkeys(buy_symbols + [p["symbol"] for p in positions_now]))) if buy_symbols else {}
+    policy_sector_of = risk_policy_data.sector_of(
+        db, {s: (m or {}).get("sector") for s, m in context["watchlist_data"].items()})
+    market_open = (context.get("market") or {}).get("open")
     for ti in merged:  # already deduped (highest confidence per ticker) + capped
         intent_dict = ti.model_dump()
 
@@ -208,6 +219,13 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
         )
         ri = build_risk_input(intent_dict, account, held_symbols, halted, market)
         result = risk.evaluate(ri)
+        # Adaptive policies run after the hard rules: a reduced size is re-evaluated by
+        # risk.evaluate (which recomputes qty); a policy violation rejects the intent.
+        result, policy_notes = risk_policies.apply(
+            intent_dict, ri, result, positions=positions_now,
+            market=risk_policy_data.market_from_indicators(market, market_open),
+            sector_of=policy_sector_of, returns_by_symbol=policy_returns)
+        final_size = float(intent_dict.get("position_size_percent") or 0)
         violations = output_violations + result.as_violation_dicts()
         passed = result.passed and not output_violations
 
@@ -217,7 +235,7 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
             action=IntentAction(ti.action),
             order_type=ti.order_type,
             limit_price=ti.limit_price,
-            position_size_percent=clamped_size,  # store the clamped value, not the raw one
+            position_size_percent=final_size,  # the clamped, policy-reduced value
             stop_loss_percent=ti.stop_loss_percent,
             take_profit_percent=ti.take_profit_percent,
             confidence=ti.confidence,
@@ -259,7 +277,8 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
               payload={"intent": intent_dict, "risk_passed": passed, "run_key": run_key,
                        "model": settings.strategist_model, "prompt_version": usage["prompt_version"],
                        **({"position_size_clamped_from": original_size,
-                           "position_size_clamped_to": clamped_size} if size_clamped else {})})
+                           "position_size_clamped_to": clamped_size} if size_clamped else {}),
+                       **({"risk_policy_notes": policy_notes} if policy_notes else {})})
         if not passed and ti.action not in ("watch", "avoid"):
             audit(db, "risk_rejection", "risk_engine", intent_id=row.id,
                   payload={"violations": violations})

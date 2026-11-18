@@ -234,7 +234,8 @@ def test_continuous_cycle_isolates_a_failing_symbol(monkeypatch, no_broker):
     monkeypatch.setattr(monitor.risk_state, "is_halted", lambda db, acct: (False, None))
     market = {s: {"last_price": 100.0, "intraday_change_pct": 0.0, "news": [],
                   "quality": {"stale": False, "incomplete": False, "missing": []},
-                  "indicators": {"relative_volume": 3.0, "rsi_14": 55, "macd": {"histogram": 0.1}}}
+                  "indicators": {"relative_volume": 3.0, "rsi_14": 55, "macd": {"histogram": 0.1},
+                                 "avg_volume_20": 5_000_000, "atr_14": 1.0}}
               for s in ("AAPL", "BOOM")}
     monkeypatch.setattr(monitor.data_aggregator, "build_context",
                         lambda syms, **kw: ({"watchlist_data": market}, {}))

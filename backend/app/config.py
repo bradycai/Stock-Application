@@ -70,6 +70,21 @@ class Settings(BaseSettings):
     penny_stock_price: Decimal = Decimal("5.00")
     max_intraday_gain_pct: Decimal = Decimal("50")
 
+    # Risk policies (app/services/risk_policies.py). These can only REDUCE a position's size
+    # or REJECT a BUY, never loosen the hard rules above. Applied after risk.evaluate in
+    # analysis, the monitor and again at execution.
+    risk_per_trade_pct: Decimal = Decimal("1.0")      # max equity at risk per trade: stop% x size% <= this
+    atr_high_pct: Decimal = Decimal("4.0")            # ATR14 as % of price above this scales size down
+    policy_min_size_pct: Decimal = Decimal("0.25")    # a size cut below this % of equity becomes a rejection
+    max_gross_exposure_pct: Decimal = Decimal("50")   # total long exposure cap, % of equity
+    max_sector_exposure_pct: Decimal = Decimal("25")  # per-sector cap, % of equity (unknown = own bucket)
+    correlation_threshold: Decimal = Decimal("0.85")  # daily-return correlation that counts as high
+    correlation_min_obs: int = 20  # overlapping daily returns needed
+    max_correlated_holdings: int = 2                  # reject when this many holdings are highly correlated
+    min_adv_usd: Decimal = Decimal("1000000")         # minimum average daily dollar volume (20d)
+    max_pct_of_adv: Decimal = Decimal("1.0")          # position notional cap as % of ADV
+    block_when_market_closed: bool = False  # optional: no new entries while closed
+
     # Prescreen + batching pipeline (large-watchlist support)
     max_watchlist_size: int = 500       # hard cap on tickers fetched/screened per run
     prescreen_top_n: int = 30           # how many top-ranked candidates go to Claude

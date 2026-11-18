@@ -12,11 +12,13 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy import false as sa_false
 from sqlalchemy.dialects.postgresql import JSONB
@@ -666,3 +668,31 @@ class StrategyProposal(Base):
     proposal: Mapped[dict] = mapped_column(JSONB, nullable=False)          # StrategistProposal dict
     validation: Mapped[dict] = mapped_column(JSONB, nullable=False)        # violations / notes
     intent_id: Mapped[int | None] = mapped_column(ForeignKey("trade_intents.id"))
+
+
+# --- ops / system alerts (PR 10) ---
+class SystemAlert(Base):
+    """An operational alert raised by the health watcher. At most one open or acked row per
+    (kind, key): repeats bump `count`/`last_seen`; it resolves when the condition clears."""
+    __tablename__ = "system_alerts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False)          # info | warning | critical
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 nullable=False)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="open")  # open | acked | resolved
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        Index("ix_system_alerts_status_last_seen", "status", "last_seen"),
+        # dedup while active: one non-resolved row per (kind, key)
+        Index("uq_system_alerts_active", "kind", "key", unique=True,
+              postgresql_where=text("status <> 'resolved'")),
+    )

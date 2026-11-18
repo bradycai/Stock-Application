@@ -1,0 +1,25 @@
+# Files whose changes can affect money movement, data integrity, secrets or CI.
+# A main-branch ruleset with "Require review from Code Owners" makes these review-required.
+
+# Risk, execution and broker access
+/backend/app/services/risk.py          @bradycai
+/backend/app/services/risk_state.py    @bradycai
+/backend/app/services/execution.py     @bradycai
+/backend/app/services/broker.py        @bradycai
+/backend/app/services/automation.py    @bradycai
+/backend/app/services/monitor.py       @bradycai
+/backend/app/config.py                 @bradycai
+
+# Database schema and migrations
+/backend/app/models.py                 @bradycai
+/backend/migrations/                   @bradycai
+/backend/alembic.ini                   @bradycai
+
+# Secrets templates
+/backend/.env.example                  @bradycai
+/frontend/.env.example                 @bradycai
+
+# CI, automation and repository rules
+/.github/                              @bradycai
+/CLAUDE.md                             @bradycai
+/.claude/                              @bradycai

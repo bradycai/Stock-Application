@@ -17,3 +17,10 @@ dist/
 
 # OS
 .DS_Store
+
+# Local database backups (pg_dump) — may contain account data
+backend/backups/
+*.dump
+
+# Tooling caches
+.ruff_cache/

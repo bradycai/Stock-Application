@@ -26,8 +26,6 @@ from sqlalchemy import select
 from app.config import settings
 from app.database import SessionLocal
 from app.deps import audit
-
-logger = logging.getLogger("trading.monitor")
 from app.models import (
     AnalysisRun,
     IntentAction,
@@ -50,6 +48,8 @@ from app.services import (
 from app.services.execution import ExecutionError, execute_intent
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size
+
+logger = logging.getLogger("trading.monitor")
 
 _task: asyncio.Task | None = None
 

@@ -134,6 +134,31 @@ python -m app.services.research_data.refresh --symbols AAPL,MSFT,NVDA
   dates, the sector, the last filing, and a `macro` block. Anything unavailable stays null
   and is listed as missing.
 
+## Market watcher
+
+The first milestone of the roadmap: a continuously running, cheap triage layer.
+
+```bash
+WATCHER_ENABLED=true python -m app.workers.market_watcher    # from backend/, separate process
+```
+
+- **One instance** (PostgreSQL advisory lock), one cycle every `WATCHER_INTERVAL_SECONDS` while
+  the market is open; outside the session it sleeps and makes no Claude calls.
+- **Deterministic first:** each cycle compares every watchlist/position symbol with its last
+  observation (new news, volume spike, breakout/breakdown, large move, position or regime
+  change) and records each signal in `signal_events`. Unchanged symbols never reach Claude.
+- **Haiku triage:** changed symbols go in small batches to `claude-haiku-5-5` (low effort)
+  with `backend/skills/market-watcher/SKILL.md` as its instructions. It answers IGNORE, WATCH,
+  INVESTIGATE, REVIEW_POSITION or ALERT with evidence ids; a decision citing an unknown symbol
+  or evidence is downgraded to IGNORE. Decisions go to `watcher_decisions`, with per-symbol
+  cooldowns.
+- **Jobs:** INVESTIGATE and REVIEW_POSITION are queued in `research_jobs` (unique keys, leases,
+  bounded retries) for the research analysts of the next phase. ALERT is logged and audited.
+- **Budget:** daily and monthly estimated-cost ceilings (`WATCHER_*_BUDGET_USD`) from the
+  `llm_calls` ledger; over budget, the cycle skips Claude and says so in its heartbeat.
+- **Observability:** `worker_heartbeats`, and `GET /watcher/status`, `/watcher/decisions`,
+  `/watcher/jobs`. The watcher never calls an order endpoint.
+
 ## Trade journal
 
 Every proposal, order and outcome is linked so results can be measured, including losses

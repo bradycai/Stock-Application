@@ -85,6 +85,13 @@ class Settings(BaseSettings):
     # ETFs used for the market-context block (index trend, sector breadth, volatility proxy).
     market_context_symbols: str = "SPY,QQQ,IWM,DIA,XLK,XLF,XLE,XLV,XLY,XLP,XLI,XLB,XLU,XLRE,XLC"
 
+    # Streaming worker (python -m app.workers.market_stream)
+    stream_flush_sec: float = 2.0            # latest-quote / bar / news buffers flush this often
+    stream_refill_sec: float = 300.0         # REST refill of 1Min bars missed while disconnected
+    stream_refill_max_minutes: int = 60      # never look back further than this on a refill
+    stream_symbol_refresh_sec: float = 180.0 # re-read watchlist + open positions this often
+    stream_heartbeat_sec: float = 60.0       # structured heartbeat log interval
+
     # Autonomous trading (all default OFF — manual approval is unchanged when off)
     auto_trading_enabled: bool = False
     # Required, in addition to TRADING_MODE=live and auto_trading_enabled, before any

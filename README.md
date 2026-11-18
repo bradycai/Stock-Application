@@ -109,6 +109,12 @@ quality and cost are evaluated.
   volatility from index and sector ETFs (`MARKET_CONTEXT_SYMBOLS`).
 - **Coverage:** the free IEX feed carries only part of US volume; the feed in use is
   recorded with every snapshot.
+- **Streaming worker:** `python -m app.workers.market_stream` (from `backend/`, separate from
+  the web server) subscribes to Alpaca quotes, minute bars and news over WebSockets for the
+  watchlist and open positions, buffers writes into `latest_quotes`, `market_bars` (1Min) and
+  `news_events`, refills missed minute bars from REST every `STREAM_REFILL_SEC`, logs a
+  heartbeat, and shuts down cleanly on Ctrl-C. It only reads market data and positions; it
+  never places orders. Free Alpaca plans allow one market-data WebSocket at a time.
 
 ## Research data
 

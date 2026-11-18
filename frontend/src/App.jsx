@@ -6,6 +6,8 @@ import RecommendationsPage from "./pages/RecommendationsPage";
 import MonitorPage from "./pages/MonitorPage";
 import HistoryPage from "./pages/HistoryPage";
 import OrdersPage from "./pages/OrdersPage";
+import ResearchPage from "./pages/ResearchPage";
+import UsagePage from "./pages/UsagePage";
 import SettingsPage from "./pages/SettingsPage";
 
 export default function App() {
@@ -102,6 +104,8 @@ export default function App() {
       {tab === "monitor" && <MonitorPage {...shared} />}
       {tab === "history" && <HistoryPage {...shared} />}
       {tab === "orders" && <OrdersPage {...shared} />}
+      {tab === "research" && <ResearchPage />}
+      {tab === "usage" && <UsagePage />}
       {tab === "settings" && <SettingsPage {...shared} />}
 
       <footer className="app-footer muted">

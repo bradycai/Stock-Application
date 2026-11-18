@@ -1,0 +1,40 @@
+name: Maintenance triage
+
+# Weekly read-only report written to the job summary: open PRs (draft/ready, CI, age), failed runs
+# on the default branch in the last 7 days, and Dependabot PRs classified as security /
+# high-risk / major / minor-patch (tools/maintenance_report.py).
+#
+# Security: read-only GITHUB_TOKEN only. No Claude and no repository secrets. Nothing is
+# commented, labeled, merged or pushed; the report goes to $GITHUB_STEP_SUMMARY.
+
+on:
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+
+concurrency:
+  group: maintenance-triage
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    name: Maintenance report
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the triage report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: python tools/maintenance_report.py --days 7

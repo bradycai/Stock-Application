@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     strategist_model: str = "claude-opus-5-5"
     strategist_effort: str = "high"
     strategist_max_tokens: int = 16000
+
+    # Strategist worker (issue #22): off by default; turns ready research bundles into
+    # validated proposals and, at most, PENDING intents (never executes anything).
+    strategist_worker_enabled: bool = False
+    strategist_poll_seconds: int = 30
+    strategist_lease_seconds: int = 900
+    strategist_daily_budget_usd: float = 5.0      # estimated strategist spend ceiling per UTC day
+    strategist_monthly_budget_usd: float = 60.0   # ... and per UTC month
+    strategist_min_reports: int = 2               # successful analyst reports needed to call Opus
     position_model: str = ""
     position_effort: str = "medium"
     position_max_tokens: int = 8000

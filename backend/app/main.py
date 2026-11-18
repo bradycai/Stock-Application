@@ -11,7 +11,7 @@ from app.routers import analysis, automation, intents, orders, portfolio
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
 from app.routers import watchlist
-from app.services import monitor
+from app.services import llm, monitor
 
 configure_logging()
 logger = logging.getLogger("trading.app")
@@ -37,7 +37,10 @@ async def on_startup():
             f"Database schema is at revision {status['current']!r} but the code expects "
             f"{status['head']!r}. Back up the database, then run: python -m app.db_migrate"
         )
+    # Fail fast on a bad model/effort setting instead of failing every Claude call later.
+    roles = {name: llm.get_role(name) for name in ("strategist", "position", "research", "watcher")}
     log_event(logger, "app.startup", schema_revision=status["current"],
+              models={n: f"{r.model}/{r.effort}" for n, r in roles.items()},
               trading_mode=settings.trading_mode, is_paper=not settings.is_live,
               auto_trading_enabled=settings.auto_trading_enabled,
               continuous_monitor_enabled=settings.continuous_monitor_enabled)

@@ -8,7 +8,7 @@ import json
 import logging
 
 from app.config import settings
-from app.logging_config import log_event
+from app.logging_config import log_event, safe_error
 from app.schemas import AnalysisOutput, MonitorDecision, PositionDecision
 from app.services import llm
 
@@ -128,8 +128,12 @@ def analyze_batch(context: dict, allowed_tickers=None) -> tuple[AnalysisOutput, 
         )
     except llm.LLMError as e:
         log_event(logger, "claude.batch_failed", logging.WARNING, tickers=allowed, kind=e.kind,
-                  detail=e.detail[:300])
+                  detail=safe_error(e.detail))
         return AnalysisOutput(intents=[]), {**e.meta, "error": f"{e.kind}: {e.detail}"}, False
+    except Exception as e:  # noqa: BLE001 - anything else (e.g. bad config) also fails closed
+        log_event(logger, "claude.batch_failed", logging.ERROR, tickers=allowed, kind="error",
+                  detail=safe_error(e))
+        return AnalysisOutput(intents=[]), {"error": f"error: {safe_error(e)}"}, False
 
     output: AnalysisOutput = result.output
     for it in output.intents:
@@ -180,6 +184,8 @@ def monitor_decision(payload: dict) -> tuple[MonitorDecision | None, dict, bool]
                                      system=MONITOR_SYSTEM_PROMPT, user=user, output_model=MonitorDecision)
     except llm.LLMError as e:
         return None, {**e.meta, "error": f"{e.kind}: {e.detail}"}, False
+    except Exception as e:  # noqa: BLE001 - fail closed on anything else too
+        return None, {"error": f"error: {safe_error(e)}"}, False
     decision: MonitorDecision = result.output
     return _checked(decision, ticker, result.meta)
 
@@ -215,5 +221,7 @@ def position_review(payload: dict) -> tuple[PositionDecision | None, dict, bool]
                                      output_model=PositionDecision)
     except llm.LLMError as e:
         return None, {**e.meta, "error": f"{e.kind}: {e.detail}"}, False
+    except Exception as e:  # noqa: BLE001 - fail closed on anything else too
+        return None, {"error": f"error: {safe_error(e)}"}, False
     decision: PositionDecision = result.output
     return _checked(decision, ticker, result.meta)

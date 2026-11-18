@@ -18,7 +18,7 @@ from app.models import (
     Watchlist,
 )
 from app.config import settings
-from app.logging_config import log_event, run_id_var
+from app.logging_config import log_event, run_id_var, safe_error
 from app.schemas import IntentOut, RunAnalysisRequest, RunSummaryOut
 from app.services import (
     analyst,
@@ -87,7 +87,7 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
     try:
         context, account = data_aggregator.build_context(tickers)
     except Exception as e:  # noqa: BLE001
-        log_event(logger, "analysis.data_failed", logging.ERROR, error=str(e)[:300])
+        log_event(logger, "analysis.data_failed", logging.ERROR, error=safe_error(e))
         raise HTTPException(status_code=502, detail=f"Data aggregation failed: {e}")
     context["data_as_of"] = data_as_of.isoformat()
 

@@ -25,7 +25,7 @@ import anthropic
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
-from app.logging_config import log_event, run_id_var
+from app.logging_config import log_event, run_id_var, safe_error
 
 logger = logging.getLogger("trading.llm")
 
@@ -157,15 +157,15 @@ def _record_call(meta: dict) -> None:
                 "cost_usd", "elapsed_ms", "request_id", "error")}))
             db.commit()
     except Exception as e:  # noqa: BLE001
-        log_event(logger, "llm.ledger_write_failed", logging.WARNING, error=str(e)[:300])
+        log_event(logger, "llm.ledger_write_failed", logging.WARNING, error=safe_error(e))
 
 
 def _finish(meta: dict, status: str, error: str | None = None) -> dict:
     meta["status"] = status
-    meta["error"] = error
+    meta["error"] = safe_error(error, 2000) if error else None  # stored in the ledger too
     level = logging.INFO if status == "ok" else logging.WARNING
     log_event(logger, "llm.call", level, **{k: v for k, v in meta.items() if k != "error"},
-              **({"error": error[:500]} if error else {}))
+              **({"error": meta["error"][:500]} if error else {}))
     _record_call(meta)
     return meta
 

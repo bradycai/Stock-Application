@@ -101,3 +101,11 @@ def test_execution_rejects_expired_intents(monkeypatch):
                             created_at=datetime.now(timezone.utc) - timedelta(minutes=5))
     execution.expire_if_stale(db, fresh)  # no exception
     assert fresh.status == IntentStatus.pending_approval
+
+
+def test_unexpected_errors_also_fail_closed(monkeypatch):
+    monkeypatch.setattr(llm, "call_structured", _fake_call(error=ValueError("bad POSITION_EFFORT")))
+    assert analyst.monitor_decision({"ticker": "AAPL"})[2] is False
+    assert analyst.position_review({"ticker": "AAPL"})[2] is False
+    output, _meta, ok = analyst.analyze_batch({"watchlist_data": {"AAPL": {}}})
+    assert ok is False and output.intents == []

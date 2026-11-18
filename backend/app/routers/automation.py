@@ -36,7 +36,8 @@ def _status(db: Session) -> AutomationStatusOut:
 
 
 def _set_mode(db: Session, mode: str, actor: str) -> AutomationStatusOut:
-    state = automation.get_state(db)
+    # Lock the row so a concurrent kill-switch request can't interleave with this check.
+    state = automation.get_state(db, for_update=True)
     if mode == "auto":
         if state.kill_switch:
             raise HTTPException(status_code=409, detail="Release the kill switch before enabling auto mode")

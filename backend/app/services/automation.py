@@ -122,8 +122,12 @@ def evaluate_gate(*, mode: str, kill_switch: bool, capability_ok: bool,
 # --------------------------------------------------------------------------- #
 # Runtime state (DB-backed)                                                   #
 # --------------------------------------------------------------------------- #
-def get_state(db: Session) -> AutomationState:
-    state = db.get(AutomationState, 1)
+def get_state(db: Session, *, fresh: bool = False, for_update: bool = False) -> AutomationState:
+    """The singleton row. `fresh` re-reads it from the database instead of returning the
+    session's cached copy (so a kill switch committed by another request is seen at once);
+    `for_update` also locks the row until the caller's transaction ends."""
+    state = db.get(AutomationState, 1, populate_existing=fresh or for_update,
+                   with_for_update=True if for_update else None)
     if state is None:
         state = AutomationState(id=1, mode="manual", kill_switch=False)
         db.add(state)
@@ -132,7 +136,9 @@ def get_state(db: Session) -> AutomationState:
 
 
 def order_gate(db: Session) -> OrderGate:
-    state = get_state(db)
+    """Evaluate the gate from a FRESH read of the automation state. Call it immediately
+    before each automated broker call, never once per batch or cycle."""
+    state = get_state(db, fresh=True)
     ok, reason = auto_capability()
     return evaluate_gate(mode=state.mode, kill_switch=state.kill_switch, capability_ok=ok,
                          capability_reason=reason, kill_reason=state.kill_switch_reason)
@@ -141,7 +147,7 @@ def order_gate(db: Session) -> OrderGate:
 def set_mode(db: Session, mode: str, actor: str) -> AutomationState:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
-    state = get_state(db)
+    state = get_state(db, for_update=True)
     state.mode = mode
     state.updated_at = datetime.now(timezone.utc)
     state.updated_by = actor
@@ -150,15 +156,15 @@ def set_mode(db: Session, mode: str, actor: str) -> AutomationState:
 
 
 def set_kill_switch(db: Session, engaged: bool, actor: str, reason: str | None = None) -> AutomationState:
-    """Engaging also drops the mode to manual, so releasing never resumes automation by itself."""
-    state = get_state(db)
+    """Engaging or releasing both leave the mode at manual, so releasing never resumes
+    automation by itself — even if a mode change raced with the engage."""
+    state = get_state(db, for_update=True)
     now = datetime.now(timezone.utc)
     state.kill_switch = engaged
     state.kill_switch_reason = (reason or "engaged from the dashboard") if engaged else None
     state.kill_switch_at = now if engaged else None
     state.kill_switch_by = actor if engaged else None
-    if engaged:
-        state.mode = "manual"
+    state.mode = "manual"
     state.updated_at = now
     state.updated_by = actor
     db.flush()

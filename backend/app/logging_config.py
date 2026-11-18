@@ -14,6 +14,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from urllib.parse import quote, quote_plus
 
 from sqlalchemy.engine import make_url
 
@@ -39,14 +40,37 @@ def _secret_values() -> list[str]:
         values.append(make_url(settings.database_url).password or "")
     except Exception:  # noqa: BLE001 - a malformed URL must not break logging
         pass
+    # Also match the forms a secret takes inside URLs and JSON strings.
+    variants = set()
+    for v in values:
+        if v and len(v) >= _MIN_SECRET_LEN:
+            variants |= {v, quote(v, safe=""), quote_plus(v), json.dumps(v)[1:-1]}
     # Longest first so a secret that contains another is fully replaced.
-    return sorted({v for v in values if v and len(v) >= _MIN_SECRET_LEN}, key=len, reverse=True)
+    return sorted(variants, key=len, reverse=True)
 
 
 def redact(text: str) -> str:
     for secret in _secret_values():
         text = text.replace(secret, _REDACTED)
     return text
+
+
+def safe_error(exc: BaseException | str, limit: int = 300) -> str:
+    """An exception message that is safe to log: redacted FIRST, then truncated (truncating
+    first could cut a secret in half so that it no longer matches)."""
+    return redact(str(exc))[:limit]
+
+
+def _scrub(value):
+    """Redact secrets inside field values before they are serialized (JSON escaping could
+    otherwise change a secret's characters so that it no longer matches)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_scrub(v) for v in value]
+    return value
 
 
 def _fields(record: logging.LogRecord) -> dict:
@@ -68,14 +92,15 @@ class JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
-        return redact(json.dumps(payload, default=str))
+        return redact(json.dumps(_scrub(payload), default=lambda o: redact(str(o))))
 
 
 class TextFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         ts = datetime.fromtimestamp(record.created, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
-        parts = [f"{ts}Z {record.levelname:<7} {record.name}: {record.getMessage()}"]
-        parts += [f"{k}={json.dumps(v, default=str)}" for k, v in _fields(record).items()]
+        parts = [f"{ts}Z {record.levelname:<7} {record.name}: {redact(record.getMessage())}"]
+        parts += [f"{k}={json.dumps(_scrub(v), default=lambda o: redact(str(o)))}"
+                  for k, v in _fields(record).items()]
         line = " ".join(parts)
         if record.exc_info:
             line += "\n" + self.formatException(record.exc_info)

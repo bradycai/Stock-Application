@@ -72,3 +72,17 @@ def test_configure_logging_is_idempotent():
     lc.configure_logging(level="INFO", fmt="json")
     ours = [h for h in logging.getLogger().handlers if getattr(h, "_trading_handler", False)]
     assert len(ours) == 1
+
+
+def test_encoded_forms_of_secrets_are_redacted(monkeypatch):
+    monkeypatch.setattr(settings, "database_url", 'postgresql+psycopg://u:p%40ss"w0rd@h:5432/d')
+    out = lc.redact("url=postgresql://u:p%40ss%22w0rd@h/d")
+    assert "p%40ss%22w0rd" not in out
+    rec = _record("x", note='quote p@ss"w0rd here')
+    assert 'p@ss' not in lc.JsonFormatter().format(rec)
+
+
+def test_safe_error_redacts_before_truncating():
+    msg = "x" * 290 + SECRET_KEY  # the secret straddles a 300-char cut
+    out = lc.safe_error(msg, 300)
+    assert SECRET_KEY[:10] not in out

@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+backups
+.venv
+venv
+node_modules
+__pycache__
+.pytest_cache
+.ruff_cache
+tests

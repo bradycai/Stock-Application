@@ -35,6 +35,8 @@ React (frontend/) ──▶ FastAPI (backend/app) ──▶ Alpaca (paper → li
   - `automation.py` — modes (manual/observe/auto), kill switch, and `order_gate()`, which every
     automated order path must check right before calling the broker.
   - `monitor.py` — background loop: safety backstop + optional continuous AI monitor.
+  - `ops/` — pure health checks, deduplicated `system_alerts`, the `/ops/status` snapshot and
+    retention (dry run by default); `workers/health_watcher.py` runs the checks.
 - `backend/tests/` — pytest suite; pure logic, no network, no real broker or Claude calls.
 - `frontend/src/` — React 18 + Vite 6 dashboard (plain JSX, no router).
 

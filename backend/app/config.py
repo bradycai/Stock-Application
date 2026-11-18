@@ -187,6 +187,25 @@ class Settings(BaseSettings):
     # --- backtest reports (PR 08) ---
     backtest_report_dir: str = "reports"  # relative paths resolve against backend/
 
+    # --- ops (PR 10) ---
+    health_watcher_enabled: bool = False          # the health-watcher worker is opt-in
+    health_watcher_interval_seconds: int = 60     # loop cadence (min 10)
+    ops_heartbeat_stale_sec: int = 300            # a worker heartbeat older than this is stale
+    ops_market_data_stale_sec: int = 300          # market open + newest quote/bar older than this
+    ops_order_failure_window_min: int = 60        # window for order reject/failure counting
+    ops_order_failure_threshold: int = 3          # failures in the window that raise an alert
+    ops_budget_alert_pct: float = 80.0            # warn at this % of a role's daily budget (critical at 100)
+    ops_research_backlog_threshold: int = 25      # queued+leased research jobs that count as a backlog
+    ops_research_failed_threshold: int = 3        # terminally failed research jobs (24h) that alert
+    ops_reconcile_window_min: int = 120           # window for reconciliation mismatch events
+    ops_reconcile_mismatch_threshold: int = 1     # mismatches in the window that raise an alert
+    # Retention (python -m app.services.ops.retention): days to keep; 0 = keep forever.
+    retention_system_alerts_days: int = 0         # resolved alerts only
+    retention_worker_heartbeats_days: int = 0     # heartbeat rows of workers that stopped
+    retention_market_bars_days: int = 0           # bars (never those a snapshot/bundle may replay)
+    retention_news_events_days: int = 0           # unreferenced news
+    retention_research_jobs_days: int = 0         # finished jobs not referenced by a bundle/decision
+
     @property
     def is_live(self) -> bool:
         return self.trading_mode.lower() == "live"

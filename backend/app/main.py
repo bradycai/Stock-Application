@@ -3,12 +3,14 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import db_migrate
 from app.config import settings
-from app.logging_config import configure_logging, log_event
+from app.logging_config import configure_logging, log_event, safe_error
 from app.routers import analysis, automation, intents, journal, orders, portfolio
 from app.routers import backtests as backtests_router
+from app.routers import ops as ops_router
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
 from app.routers import proposals as proposals_router
@@ -64,6 +66,23 @@ def health():
     return {"status": "ok", "trading_mode": settings.trading_mode}
 
 
+@app.get("/health/ready", tags=["health"])
+def health_ready():
+    """Readiness: database reachable and schema at head. No broker or Claude calls.
+    Any doubt (error, behind, unknown) is a 503."""
+    checks: dict = {"database": False, "schema_up_to_date": False}
+    try:
+        status = db_migrate.schema_status()
+        checks["database"] = True
+        checks["schema_up_to_date"] = bool(status.get("up_to_date"))
+        checks["schema_revision"] = status.get("current")
+        checks["schema_head"] = status.get("head")
+    except Exception as e:  # noqa: BLE001
+        checks["error"] = safe_error(e)
+    ready = checks["database"] and checks["schema_up_to_date"]
+    return JSONResponse({"ready": ready, "checks": checks}, status_code=200 if ready else 503)
+
+
 app.include_router(portfolio.router)
 app.include_router(watchlist.router)
 app.include_router(analysis.router)
@@ -79,3 +98,4 @@ app.include_router(proposals_router.router)
 app.include_router(usage_router.router)
 app.include_router(watcher_router.router)
 app.include_router(backtests_router.router)
+app.include_router(ops_router.router)

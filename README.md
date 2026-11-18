@@ -428,6 +428,23 @@ was down past a job's grace window skips that period rather than running it late
   minute by `python3 tools/agent_progress.py watch`. Agents report milestones with
   `tools/agent_progress.py update`; the lead marks an issue INTEGRATED only after reviewing,
   re-testing and pushing it. The board is local and not committed.
+- **Agent task ledger:** `tools/agent_ledger.py` records who owns each issue (actor, agent,
+  branch, PR, retries, budget, commit) and refuses a duplicate claim, overlapping file scopes,
+  more than `--max-retries` repair attempts, too many claims per hour, or anything while
+  paused (`pause` / `resume`). Local and not committed, like the board.
+- **`@claude` on GitHub** (`.github/workflows/claude.yml`, Claude Code GitHub Actions): the
+  owner or a collaborator can write `@claude ...` in an issue, comment or review; Claude works
+  on its own `agent/<issue>-<slug>` branch and replies with a link to open a **draft** PR.
+  Bots, forks and other users are ignored, the workflow token is read-only, Claude has no
+  shell or network and can't read `.env` files or edit workflows, and it never merges.
+  **Off until you enable it:** install the Claude GitHub App (`/install-github-app` in
+  Claude Code, or https://github.com/apps/claude), add the `ANTHROPIC_API_KEY` repository
+  secret, and merge the workflow into `Production` (the action only runs workflow files that
+  match the default branch).
+- **Weekly maintenance triage** (`.github/workflows/maintenance.yml`, Mondays, read-only, no
+  Claude): open PRs with CI state and age, failed runs on the default branch, and Dependabot
+  PRs classified as security / high-risk (Anthropic, Alpaca, SQLAlchemy, psycopg, Alembic,
+  Actions) / major / minor-patch, in the run's summary.
 
 ## Project layout
 

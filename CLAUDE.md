@@ -106,6 +106,8 @@ with the lead session reviewing and integrating (full procedure: `.claude/skills
   adding docs, scanning for secrets, pushing, and opening the draft PR.
 - `.progress/` (per-issue state) and `PROGRESS.txt` are local and gitignored: the board rewrites
   itself every minute, so it is never committed.
+- **Ledger:** claim each issue with `tools/agent_ledger.py claim` before launching its agent,
+  `attempt` before each repair loop (a refusal means stop and ask the user), `release` on integrate.
 
 ## Auto-merge (only when everything is good)
 

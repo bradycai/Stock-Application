@@ -13,7 +13,35 @@ class Settings(BaseSettings):
 
     # Claude
     anthropic_api_key: str = ""
-    claude_model: str = "claude-opus-4-8"
+
+    # Model routing (one model + effort per layer). Every Claude request goes through
+    # app.services.llm, which applies these.
+    #   strategist — trade analysis (proposes buy/sell/watch/avoid intents)
+    #   position   — continuous-monitor and open-position decisions (empty = strategist model)
+    #   research   — specialist analysts (later phases)
+    #   watcher    — high-frequency event watcher (later phases)
+    strategist_model: str = "claude-opus-5-5"
+    strategist_effort: str = "high"
+    strategist_max_tokens: int = 16000
+    position_model: str = ""
+    position_effort: str = "medium"
+    position_max_tokens: int = 8000
+    research_model: str = "claude-sonnet-5-5"
+    research_effort: str = "medium"
+    research_max_tokens: int = 8000
+    watcher_model: str = "claude-haiku-5-5"
+    watcher_effort: str = "low"
+    watcher_max_tokens: int = 4000
+
+    # Claude request controls
+    llm_timeout_sec: float = 300.0       # per attempt
+    llm_max_retries: int = 2             # SDK retries on 408/409/429/5xx and network errors
+    llm_refusal_fallbacks: bool = True   # server-side fallback on safety refusals, where supported
+
+    # Fail-closed freshness and sanity limits for model output
+    max_data_age_sec: int = 600          # market snapshot older than this -> no actionable intents
+    intent_max_age_min: int = 60         # pending intents older than this can't be approved
+    max_limit_deviation_pct: Decimal = Decimal("10")  # limit price vs. last price at analysis time
 
     # Alpaca
     alpaca_key: str = ""

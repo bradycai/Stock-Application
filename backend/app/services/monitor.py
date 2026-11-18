@@ -175,7 +175,7 @@ def _compact_payload(symbol, snap, mdata, position, fired):
 
 def _get_monitor_run(db) -> AnalysisRun:
     run = AnalysisRun(
-        model=settings.claude_model, prompt_tokens=0, output_tokens=0,
+        model=settings.position_model or settings.strategist_model, prompt_tokens=0, output_tokens=0,
         input_context={"source": "continuous_monitor"}, raw_response={},
     )
     db.add(run)

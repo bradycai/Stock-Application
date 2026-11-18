@@ -3,59 +3,74 @@ models."""
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # --------------------------------------------------------------------------- #
 # Claude structured-output contract                                           #
 # --------------------------------------------------------------------------- #
+# These models are sent to Claude as JSON schemas (structured outputs) and every response
+# is validated against them again. They bound values to what is physically meaningful;
+# trading policy (sizes, stops, freshness, evidence) is enforced afterwards in
+# intent_validation.py and risk.py, per intent, so one bad intent never sinks a batch.
+TICKER_PATTERN = r"^[A-Z][A-Z0-9.-]{0,9}$"
+_STRICT = ConfigDict(extra="forbid")
+
+
 class TradeIntent(BaseModel):
     """Exactly the JSON Claude is allowed to return per intent.
 
     Note: there is NO absolute-quantity field. Claude proposes a percentage of the
-    portfolio; the backend computes share counts from live equity and price. The
-    `le=...` bounds mirror the risk rules so Claude's output is self-consistent, but
-    the RISK ENGINE is the enforcement — not this schema.
+    portfolio; the backend computes share counts from live equity and price.
     """
-    ticker: str
+    model_config = _STRICT
+
+    ticker: str = Field(pattern=TICKER_PATTERN, description="One of the requested tickers, exactly")
     action: Literal["buy", "sell", "watch", "avoid"]
-    order_type: Literal["limit"] = "limit"
-    limit_price: float = Field(ge=0)
-    # No upper bound here on purpose: if Claude over-proposes size, we do NOT want the
-    # whole run to fail client-side validation. The risk engine rejects an oversize
-    # intent (POSITION_TOO_LARGE) and records it — that is the authoritative guard.
-    position_size_percent: float = Field(ge=0)
-    stop_loss_percent: float = Field(ge=0)
-    take_profit_percent: float = Field(ge=0)
+    order_type: Literal["limit"]
+    limit_price: float = Field(ge=0, le=1_000_000)
+    # Over-size proposals are clamped to MAX_POSITION_PCT by the backend, not rejected here.
+    position_size_percent: float = Field(ge=0, le=100)
+    stop_loss_percent: float = Field(ge=0, le=100)
+    take_profit_percent: float = Field(ge=0, le=1000)
     confidence: float = Field(ge=0, le=1)
     reason: str
     risks: str
+    evidence: list[str] = Field(
+        description="Input data points that drove the call, e.g. 'rsi_14=55.2' or 'news: <headline>'",
+    )
 
 
 class AnalysisOutput(BaseModel):
+    model_config = _STRICT
+
     intents: list[TradeIntent]
 
 
 class PositionDecision(BaseModel):
     """Claude's re-evaluation of a HELD position ('would we buy it again right now?')."""
-    ticker: str
+    model_config = _STRICT
+
+    ticker: str = Field(pattern=TICKER_PATTERN)
     action: Literal["hold", "trim", "sell", "add", "tighten_stop"]
     confidence: float = Field(ge=0, le=1)
     reason: str
-    updated_thesis: str = ""
-    exit_condition: str = ""
+    updated_thesis: str
+    exit_condition: str
 
 
 class MonitorDecision(BaseModel):
     """Claude's decision for a single triggered ticker during continuous monitoring."""
-    ticker: str
+    model_config = _STRICT
+
+    ticker: str = Field(pattern=TICKER_PATTERN)
     action: Literal["hold", "buy", "sell", "trim", "add", "tighten_stop", "raise_take_profit"]
     confidence: float = Field(ge=0, le=1)
     reason: str
-    size_percent: float = Field(default=0, ge=0)            # for buy/add
-    stop_loss_percent: float = Field(default=0, ge=0)        # for buy/add/tighten_stop
-    take_profit_percent: float = Field(default=0, ge=0)      # for buy/add/raise_take_profit
-    limit_price: float = Field(default=0, ge=0)              # for buy/add
+    size_percent: float = Field(ge=0, le=100)            # for buy/add
+    stop_loss_percent: float = Field(ge=0, le=100)       # for buy/add/tighten_stop
+    take_profit_percent: float = Field(ge=0, le=1000)    # for buy/add/raise_take_profit
+    limit_price: float = Field(ge=0, le=1_000_000)       # for buy/add
 
 
 # --------------------------------------------------------------------------- #

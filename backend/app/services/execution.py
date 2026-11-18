@@ -51,8 +51,35 @@ def _intent_dict(intent: TradeIntent) -> dict:
     }
 
 
+def intent_age_minutes(intent: TradeIntent, now: datetime | None = None) -> float | None:
+    if intent.created_at is None:
+        return None
+    created = intent.created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return ((now or datetime.now(timezone.utc)) - created).total_seconds() / 60
+
+
+def expire_if_stale(db: Session, intent: TradeIntent) -> None:
+    """Cancel and refuse an intent older than INTENT_MAX_AGE_MIN (raises ExecutionError)."""
+    age = intent_age_minutes(intent)
+    if age is None or age <= settings.intent_max_age_min:
+        return
+    intent.status = IntentStatus.canceled
+    audit(db, "intent_expired", "system", intent_id=intent.id,
+          payload={"age_minutes": round(age, 1), "max_age_minutes": settings.intent_max_age_min})
+    log_event(logger, "intent.expired", logging.WARNING, intent_id=intent.id, ticker=intent.ticker,
+              age_minutes=round(age, 1), max_age_minutes=settings.intent_max_age_min)
+    raise ExecutionError(409, f"Intent expired: it is {age:.0f} minutes old (max "
+                              f"{settings.intent_max_age_min}). Re-run the analysis for a fresh proposal.")
+
+
 def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool = False) -> Order:
     """Re-validate risk and submit a bracket order. Caller commits afterward."""
+    # 0. Fail closed on stale proposals: an intent is only valid for a short window after
+    #    the market snapshot it was based on.
+    expire_if_stale(db, intent)
+
     # 1. Fresh account/positions (state may have moved since the recommendation)
     try:
         account = broker.get_account()

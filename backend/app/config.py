@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # CORS
     frontend_origin: str = "http://localhost:5173"
 
+    # Logging: INFO-level structured logs. LOG_FORMAT=json (default) or text.
+    log_level: str = "INFO"
+    log_format: str = "json"
+
     @property
     def is_live(self) -> bool:
         return self.trading_mode.lower() == "live"

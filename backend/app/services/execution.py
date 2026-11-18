@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.deps import audit
+from app.logging_config import log_event
 from app.models import IntentStatus, Order, TradeIntent
 from app.services import broker, risk, risk_state
 from app.services.orchestrator import build_risk_input
@@ -69,11 +70,10 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
     result = risk.evaluate(ri)
     if not result.passed:
         codes = [v["code"] for v in result.as_violation_dicts()]
-        logger.warning(
-            "RISK REJECT %s %s: %s | filled_positions=%d held=%s max=%d",
-            intent.action.value, intent.ticker, codes,
-            len(positions), sorted(held_symbols), risk.settings.max_open_positions,
-        )
+        log_event(logger, "risk.rejected", logging.WARNING, intent_id=intent.id, ticker=intent.ticker,
+                  action=intent.action.value, actor=actor, auto=auto, risk_passed=False,
+                  violations=codes, open_positions=len(positions), held=sorted(held_symbols),
+                  max_open_positions=risk.settings.max_open_positions)
         intent.status = IntentStatus.rejected_by_risk
         intent.risk_passed = False
         intent.risk_violations = result.as_violation_dicts()
@@ -174,4 +174,9 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
               payload={"computed_qty": result.computed_qty, "is_live": intent.is_live})
 
     audit(db, "order_submit", "system", intent_id=intent.id, order_id=order.id, payload=order_data)
+    log_event(logger, "order.submitted", intent_id=intent.id, order_id=order.id,
+              broker_order_id=order.broker_order_id, client_order_id=client_order_id,
+              ticker=intent.ticker, side=order.side, qty=order.qty, limit_price=order.limit_price,
+              stop_loss_price=order.stop_loss_price, actor=actor, auto=auto,
+              is_live=order.is_live, risk_passed=True)
     return order

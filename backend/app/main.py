@@ -1,14 +1,20 @@
 """FastAPI application entrypoint."""
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
 from app import db_migrate
+from app.config import settings
+from app.logging_config import configure_logging, log_event
 from app.routers import analysis, automation, intents, orders, portfolio
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
 from app.routers import watchlist
 from app.services import monitor
+
+configure_logging()
+logger = logging.getLogger("trading.app")
 
 app = FastAPI(title="AI Trading Assistant", version="1.1.0")
 
@@ -31,6 +37,10 @@ async def on_startup():
             f"Database schema is at revision {status['current']!r} but the code expects "
             f"{status['head']!r}. Back up the database, then run: python -m app.db_migrate"
         )
+    log_event(logger, "app.startup", schema_revision=status["current"],
+              trading_mode=settings.trading_mode, is_paper=not settings.is_live,
+              auto_trading_enabled=settings.auto_trading_enabled,
+              continuous_monitor_enabled=settings.continuous_monitor_enabled)
     # Background position monitor. It is a no-op while automation is inactive (default).
     monitor.start()
 

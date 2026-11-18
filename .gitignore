@@ -28,3 +28,6 @@ backend/backups/
 # Agent progress board (local only)
 .progress/
 PROGRESS.txt
+
+# Claude Code agent worktrees (isolated per-issue checkouts)
+.claude/worktrees/

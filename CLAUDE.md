@@ -20,7 +20,10 @@ React (frontend/) ──▶ FastAPI (backend/app) ──▶ Alpaca (paper → li
 - `backend/app/config.py` — every setting, read from `backend/.env`.
 - `backend/app/routers/` — HTTP routes (`analysis`, `intents`, `orders`, `automation`, `risk`, `monitor`, ...).
 - `backend/app/services/`
-  - `data_aggregator.py` — Alpaca quotes/bars/news → indicator context.
+  - `data_aggregator.py` — builds the model context (quotes, indicators, news, quality flags,
+    market context) from `market_data.py` (batched Alpaca requests).
+  - `indicators.py` (pure math), `snapshots.py` (quality flags, replayable snapshots, bar/quote
+    storage), `news_store.py` (dedup + event classification), `market_context.py`.
   - `prescreener.py` — deterministic ranking; only the top N reach Claude.
   - `llm.py` — the ONLY Claude client: role-based model/effort routing, structured outputs,
     fail-closed handling, token/cost ledger (`llm_calls`). Never call the SDK elsewhere.

@@ -5,6 +5,8 @@ from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
+    Float,
+    UniqueConstraint,
     Boolean,
     Date,
     DateTime,
@@ -72,6 +74,8 @@ class AnalysisRun(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("account_snapshots.id"))
+    # The exact market data the model saw (replayable); null for runs before Phase 2.
+    market_snapshot_id: Mapped[int | None] = mapped_column(ForeignKey("market_snapshots.id"))
     model: Mapped[str] = mapped_column(String, nullable=False)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -256,3 +260,96 @@ class LLMCall(Base):
     elapsed_ms: Mapped[int | None] = mapped_column(Integer)
     request_id: Mapped[str | None] = mapped_column(String)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: market data and research history                                   #
+# --------------------------------------------------------------------------- #
+class MarketSnapshot(Base):
+    """The exact, timestamped market data one analysis/monitor run used. `data` is the full
+    context sent to the model (portfolio, per-symbol quotes/indicators/news, market
+    context), so a run can be replayed later; `quality` holds the per-symbol stale /
+    incomplete / missing-field flags computed before any model saw the data."""
+    __tablename__ = "market_snapshots"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    run_id: Mapped[str | None] = mapped_column(String, index=True)
+    purpose: Mapped[str] = mapped_column(String, nullable=False)        # analysis | monitor | watcher
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)  # collection start
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    feed: Mapped[str] = mapped_column(String, nullable=False)
+    market_open: Mapped[bool | None] = mapped_column(Boolean)
+    symbols: Mapped[list] = mapped_column(JSONB, nullable=False)
+    data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    quality: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class MarketBar(Base):
+    """Price bars as received (one row per symbol/timeframe/bar time/feed). Append-only
+    history for replay and backtesting; refetched bars update in place."""
+    __tablename__ = "market_bars"
+    __table_args__ = (UniqueConstraint("symbol", "timeframe", "ts", "feed", name="uq_market_bars_key"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    timeframe: Mapped[str] = mapped_column(String, nullable=False)       # 1Day | 1Min
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    open: Mapped[float] = mapped_column(Float, nullable=False)
+    high: Mapped[float] = mapped_column(Float, nullable=False)
+    low: Mapped[float] = mapped_column(Float, nullable=False)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
+    volume: Mapped[float] = mapped_column(Float, nullable=False)
+    vwap: Mapped[float | None] = mapped_column(Float)
+    trade_count: Mapped[float | None] = mapped_column(Float)
+    feed: Mapped[str] = mapped_column(String, nullable=False)
+    adjustment: Mapped[str] = mapped_column(String, nullable=False, default="raw")
+    source: Mapped[str] = mapped_column(String, nullable=False, default="alpaca")
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LatestQuote(Base):
+    """Most recent observed quote/trade per symbol (from snapshots or the stream)."""
+    __tablename__ = "latest_quotes"
+
+    symbol: Mapped[str] = mapped_column(String, primary_key=True)
+    bid: Mapped[float | None] = mapped_column(Float)
+    ask: Mapped[float | None] = mapped_column(Float)
+    bid_size: Mapped[float | None] = mapped_column(Float)
+    ask_size: Mapped[float | None] = mapped_column(Float)
+    quote_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_trade_price: Mapped[float | None] = mapped_column(Float)
+    last_trade_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    feed: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)          # snapshot | stream
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())
+
+
+class NewsEvent(Base):
+    """A news article, stored once. `dedup_hash` collapses the same story arriving from
+    different sources or for different symbols; `event_type` is a deterministic keyword
+    classification (versioned) — model-based extraction fills `extraction` later."""
+    __tablename__ = "news_events"
+    __table_args__ = (UniqueConstraint("source", "external_id", name="uq_news_events_source_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)           # alpaca | newsapi
+    external_id: Mapped[str] = mapped_column(String, nullable=False)
+    publisher: Mapped[str | None] = mapped_column(String)                 # e.g. benzinga
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[str | None] = mapped_column(Text)                     # full text when available
+    url: Mapped[str | None] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(String)
+    symbols: Mapped[list] = mapped_column(JSONB, nullable=False)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    first_seen_run_id: Mapped[str | None] = mapped_column(String)
+    dedup_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    classifier_version: Mapped[str] = mapped_column(String, nullable=False)
+    extraction: Mapped[dict | None] = mapped_column(JSONB)

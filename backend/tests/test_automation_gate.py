@@ -236,7 +236,7 @@ def test_continuous_cycle_isolates_a_failing_symbol(monkeypatch, no_broker):
                   "indicators": {"relative_volume": 3.0, "rsi_14": 55, "macd": {"histogram": 0.1}}}
               for s in ("AAPL", "BOOM")}
     monkeypatch.setattr(monitor.data_aggregator, "build_context",
-                        lambda syms: ({"watchlist_data": market}, {}))
+                        lambda syms, **kw: ({"watchlist_data": market}, {}))
 
     def decide(payload):
         if payload["ticker"] == "BOOM":

@@ -67,6 +67,17 @@ class Settings(BaseSettings):
     # Optional data sources
     news_api_key: str = ""
 
+    # Market data layer (batched Alpaca requests + snapshot store)
+    alpaca_data_feed: str = ""          # "" = the account's default feed (IEX on free plans); "iex" | "sip"
+    data_chunk_size: int = 100          # symbols per batched Alpaca request
+    data_max_concurrency: int = 4       # parallel batched requests (bounded to respect rate limits)
+    bars_cache_ttl_sec: int = 900       # in-process cache for daily bars
+    max_quote_age_sec: int = 120        # during market hours, an older quote is flagged stale
+    news_lookback_hours: int = 48
+    news_per_symbol: int = 5
+    # ETFs used for the market-context block (index trend, sector breadth, volatility proxy).
+    market_context_symbols: str = "SPY,QQQ,IWM,DIA,XLK,XLF,XLE,XLV,XLY,XLP,XLI,XLB,XLU,XLRE,XLC"
+
     # Autonomous trading (all default OFF — manual approval is unchanged when off)
     auto_trading_enabled: bool = False
     # Required, in addition to TRADING_MODE=live and auto_trading_enabled, before any

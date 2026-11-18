@@ -63,3 +63,14 @@ def test_required_fields_and_bounds(field, value, code):
 
 def test_sell_is_held_to_the_same_rules():
     assert "MISSING_EVIDENCE" in _codes(_intent(action="sell", evidence=[]))
+
+
+def test_stale_or_incomplete_symbol_data_blocks_actionable_intents():
+    def codes(quality, action="buy"):
+        return [v["code"] for v in validate_intent(_intent(action=action), last_price=100.0, data_age_sec=1,
+                                                   max_data_age_sec=600, max_limit_deviation_pct=10,
+                                                   quality=quality)]
+    assert "STALE_QUOTE" in codes({"stale": True, "quote_age_sec": 900})
+    assert "INCOMPLETE_DATA" in codes({"incomplete": True, "missing": ["price_history"]})
+    assert codes({"stale": False, "incomplete": False}) == []
+    assert codes({"stale": True}, action="watch") == []

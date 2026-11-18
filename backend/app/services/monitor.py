@@ -341,7 +341,7 @@ def _run_continuous(db, account, positions, gate: automation.OrderGate) -> dict:
 
     data_as_of = datetime.now(timezone.utc)
     try:
-        context, _acct = data_aggregator.build_context(monitored)
+        context, _acct = data_aggregator.build_context(monitored, db=db, run_id=run_id_var.get())
     except Exception as e:  # noqa: BLE001
         counts["errors"] += 1
         audit(db, "monitor_error", "monitor", payload={"error": f"data: {e}"})
@@ -717,6 +717,7 @@ def _persist_buy_intent(db, run, symbol, decision, snap, mdata, account, held, h
         intent_dict, last_price=(mdata or {}).get("last_price") or snap.get("price"),
         data_age_sec=data_age_sec, max_data_age_sec=settings.max_data_age_sec,
         max_limit_deviation_pct=float(settings.max_limit_deviation_pct),
+        quality=(mdata or {}).get("quality"),
     )
     ri = build_risk_input(intent_dict, account, held, halted, mdata)
     res = risk.evaluate(ri)

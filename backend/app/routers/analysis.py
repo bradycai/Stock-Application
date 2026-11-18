@@ -13,6 +13,7 @@ from app.models import (
     AccountSnapshot,
     AnalysisRun,
     IntentAction,
+    MarketSnapshot,
     IntentStatus,
     TradeIntent,
     Watchlist,
@@ -27,6 +28,7 @@ from app.services import (
     data_aggregator,
     intent_validation,
     prescreener,
+    snapshots,
     risk,
     risk_state,
     universes,
@@ -85,11 +87,16 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
     #    time is taken BEFORE fetching, so data age is measured conservatively.
     data_as_of = datetime.now(timezone.utc)
     try:
-        context, account = data_aggregator.build_context(tickers)
+        context, account = data_aggregator.build_context(tickers, db=db, run_id=run_key)
     except Exception as e:  # noqa: BLE001
         log_event(logger, "analysis.data_failed", logging.ERROR, error=safe_error(e))
         raise HTTPException(status_code=502, detail=f"Data aggregation failed: {e}")
     context["data_as_of"] = data_as_of.isoformat()
+    # The exact data the model is about to see, stored with its quality flags (replayable).
+    market_snapshot = snapshots.save_snapshot(db, purpose="analysis", run_id=run_key, as_of=data_as_of,
+                                              context=context)
+    log_event(logger, "snapshot.saved", snapshot_id=market_snapshot.id, symbols=len(tickers),
+              market_open=market_snapshot.market_open, feed=market_snapshot.feed)
 
     # [DATA] per-ticker success/failure (never silently drop a ticker).
     for sym in tickers:
@@ -158,10 +165,12 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
 
     run = AnalysisRun(
         snapshot_id=snapshot.id,
+        market_snapshot_id=market_snapshot.id,
         model=settings.strategist_model,
         prompt_tokens=usage["prompt_tokens"],
         output_tokens=usage["output_tokens"],
-        input_context={"run_key": run_key, "tickers_screened": len(tickers), "top_symbols": top_symbols,
+        input_context={"run_key": run_key, "market_snapshot_id": market_snapshot.id,
+                       "tickers_screened": len(tickers), "top_symbols": top_symbols,
                        "universe": req.universe, "effort": settings.strategist_effort,
                        "prompt_version": usage["prompt_version"],
                        "estimated_cost_usd": round(usage["cost_usd"], 6),
@@ -194,6 +203,7 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
             intent_dict, last_price=market.get("last_price"), data_age_sec=data_age_sec,
             max_data_age_sec=settings.max_data_age_sec,
             max_limit_deviation_pct=float(settings.max_limit_deviation_pct),
+            quality=market.get("quality"),
         )
         ri = build_risk_input(intent_dict, account, held_symbols, halted, market)
         result = risk.evaluate(ri)
@@ -323,6 +333,20 @@ def _auto_execute_eligible(db: Session, intents: list[TradeIntent], *, observe: 
             log_event(logger, "auto_trade.rejected", ticker=row.ticker, reason=str(e.detail))
 
 
+@router.get("/snapshots/{snapshot_id}")
+def get_snapshot(snapshot_id: int, db: Session = DB, _actor: str = Actor):
+    """The exact market data an analysis run sent to the model, with its quality flags."""
+    snap = db.get(MarketSnapshot, snapshot_id)
+    if not snap:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return {
+        "id": snap.id, "created_at": snap.created_at, "run_id": snap.run_id, "purpose": snap.purpose,
+        "as_of": snap.as_of, "completed_at": snap.completed_at, "feed": snap.feed,
+        "market_open": snap.market_open, "symbols": snap.symbols, "quality": snap.quality,
+        "content_hash": snap.content_hash, "data": snap.data,
+    }
+
+
 @router.get("/runs/{run_id}")
 def get_run(run_id: int, db: Session = DB, _actor: str = Actor):
     run = db.get(AnalysisRun, run_id)
@@ -332,6 +356,7 @@ def get_run(run_id: int, db: Session = DB, _actor: str = Actor):
         "id": run.id,
         "created_at": run.created_at,
         "model": run.model,
+        "market_snapshot_id": run.market_snapshot_id,
         "prompt_tokens": run.prompt_tokens,
         "output_tokens": run.output_tokens,
         "input_context": run.input_context,

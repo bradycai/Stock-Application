@@ -7,6 +7,9 @@ well-formed (the schema already guarantees that).
 
 Checks:
 - STALE_DATA: the market snapshot the model saw is older than MAX_DATA_AGE_SEC.
+- STALE_QUOTE / INCOMPLETE_DATA: the symbol's data-quality flags (computed before the model
+  saw the data) say its quote was stale while the market was open, or its price/history
+  was missing.
 - NO_MARKET_PRICE / INVALID_LIMIT_PRICE / LIMIT_PRICE_OFF_MARKET: the limit price must be
   positive and within MAX_LIMIT_DEVIATION_PCT of the last price the model was shown, so a
   fabricated or mistyped price can't become an order.
@@ -25,12 +28,18 @@ def _v(code: str, message: str) -> dict:
 
 
 def validate_intent(intent: dict, *, last_price: float | None, data_age_sec: float,
-                    max_data_age_sec: float, max_limit_deviation_pct: float) -> list[dict]:
+                    max_data_age_sec: float, max_limit_deviation_pct: float,
+                    quality: dict | None = None) -> list[dict]:
     """Return the list of violations (empty = passed). `intent` is a TradeIntent dict."""
     if intent.get("action") not in ACTIONABLE:
         return []
 
     violations: list[dict] = []
+    if quality and quality.get("stale"):
+        violations.append(_v("STALE_QUOTE", f"quote was {quality.get('quote_age_sec')}s old while the "
+                                            "market was open"))
+    if quality and quality.get("incomplete"):
+        violations.append(_v("INCOMPLETE_DATA", f"missing {', '.join(quality.get('missing') or [])}"))
     if data_age_sec > max_data_age_sec:
         violations.append(_v("STALE_DATA", f"market data was {data_age_sec:.0f}s old at decision "
                                            f"time (max {max_data_age_sec:.0f}s)"))

@@ -74,8 +74,8 @@ control, and trading stays on paper until the system has been independently vali
 |----|-------------|--------|
 | 00 | GitHub protections, Dependabot, CI and Claude Code workflow | Done (in review) |
 | 01 | Startup, model routing, logging, schema validation, migrations (Phase 1) | Done (in review) |
-| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | In progress |
-| 03 | Journal schema and decision/outcome tracking | Planned |
+| 02 | Snapshot store, batched data, market/news ingestion (Phase 2) | Done (in review); WebSocket streaming moves to PR 04 with the worker |
+| 03 | Journal schema and decision/outcome tracking | Next |
 | 04 | Haiku watcher skill, worker, jobs, budget and heartbeats | Planned |
 | 05 | News, technical, fundamentals, macro and institutional analysts | Planned |
 | 06 | Opus strategy orchestration and enriched research UI | Planned |
@@ -87,6 +87,28 @@ control, and trading stays on paper until the system has been independently vali
 The first milestone is PRs 01–04: a safe, continuously running watcher that records
 evidence and triggers research jobs, with automated execution kept off while signal
 quality and cost are evaluated.
+
+## Market data layer
+
+- **Batched requests:** quotes, daily bars and news come from multi-symbol Alpaca requests
+  (`DATA_CHUNK_SIZE` symbols each, at most `DATA_MAX_CONCURRENCY` in parallel). A failed
+  batch is retried symbol by symbol, so one bad ticker can't blank the others. Daily bars
+  are cached for `BARS_CACHE_TTL_SEC`.
+- **Quality flags before the model:** every symbol gets `stale` (quote older than
+  `MAX_QUOTE_AGE_SEC` while the market is open), `incomplete` (no price or history) and a
+  `missing` list (unavailable fields are labeled, never guessed). Buy/sell intents for a
+  stale or incomplete symbol are rejected.
+- **Replayable snapshots:** each analysis run stores the exact context the model saw, with
+  its quality flags, feed and market state, in `market_snapshots`
+  (`GET /analysis/snapshots/{id}`); `analysis_runs.market_snapshot_id` links the run to it.
+- **History:** daily bars (`market_bars`), latest quotes (`latest_quotes`) and news
+  (`news_events`) are stored. News is deduplicated across sources and symbols, marked
+  `is_new` the first time it is seen, classified by event type, and shown to the model as
+  citable `news:<id>` items.
+- **Market context:** index trends, sector breadth, sector leaders/laggards and realized
+  volatility from index and sector ETFs (`MARKET_CONTEXT_SYMBOLS`).
+- **Coverage:** the free IEX feed carries only part of US volume; the feed in use is
+  recorded with every snapshot.
 
 ## Development workflow
 

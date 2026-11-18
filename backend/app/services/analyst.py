@@ -26,6 +26,20 @@ SMA, RSI, MACD, 52-week range, relative volume, 5/20/60-day returns), recent new
 headlines, earnings date, analyst actions, and sector — whatever is present per ticker. \
 A null or missing field means the data is unavailable, not zero.
 
+DATA QUALITY: each ticker has a "quality" block computed before you saw the data. If \
+quality.stale or quality.incomplete is true, do NOT return "buy" or "sell" for that ticker \
+(use "watch", or "avoid" if untradeable, and say what is missing). Fields listed in \
+quality.missing are unavailable — never assume values for them. The "market" block says \
+whether the market is open and which data feed was used (IEX volume is partial).
+
+NEWS items have an "id" such as "news:123", a publisher, a publication time, an \
+event_type and is_new (true = first seen in this run). Cite the id in evidence when news \
+drove the call, and consider whether the price already reflects older news.
+
+MARKET CONTEXT ("market_context") summarizes index trends, sector breadth, sector \
+leaders/laggards and realized volatility. Use it to judge whether the broad market \
+supports a trade; a "risk_off" regime_hint argues for smaller size or "watch".
+
 CLASSIFY each ticker into exactly one action:
 - "buy": ALL THREE hold — (a) technicals constructive (e.g. price above rising 50/200-day \
 SMA, RSI roughly 40-70 not overbought, MACD supportive); (b) a catalyst (earnings, news, \
@@ -61,7 +75,7 @@ size above the cap.
 - reason: a concise thesis naming the specific indicators, levels or catalyst that drove \
 the call. risks: what would invalidate it. Each under 240 characters.
 - evidence: 1-5 short citations of exact input data points, written as field=value \
-(e.g. "rsi_14=55.2", "relative_volume=2.1") or "news: <headline>".
+(e.g. "rsi_14=55.2", "relative_volume=2.1") or a news id (e.g. "news:123").
 
 For "watch"/"avoid", set numeric fields you cannot justify to 0; evidence may be empty.
 

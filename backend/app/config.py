@@ -2,6 +2,7 @@
 from decimal import Decimal
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,6 +33,17 @@ class Settings(BaseSettings):
     watcher_model: str = "claude-haiku-5-5"
     watcher_effort: str = "low"
     watcher_max_tokens: int = 4000
+
+    # Market watcher (issue #12): off by default; only reads data and queues research jobs.
+    watcher_enabled: bool = False
+    watcher_interval_seconds: int = 60          # clamped to 30-300
+    watcher_closed_sleep_seconds: int = 300     # poll interval outside the market session
+    watcher_cooldown_minutes: int = 15          # min gap between Claude assessments of one symbol
+    watcher_batch_size: int = 8                 # changed symbols per Claude call
+    watcher_daily_budget_usd: float = 2.0       # estimated watcher spend ceiling per UTC day
+    watcher_monthly_budget_usd: float = 30.0    # ... and per UTC month
+    watcher_job_max_attempts: int = 3
+    watcher_job_lease_seconds: int = 300
 
     # Claude request controls
     llm_timeout_sec: float = 300.0       # per attempt
@@ -116,6 +128,11 @@ class Settings(BaseSettings):
     partial_profit_amounts: str = "20,20,20"       # % of original qty to sell at each level
     confidence_recheck_interval: int = 300         # force a Claude re-review every N seconds
     max_hold_days: int = 20                        # flag/review positions held longer than this
+
+    @field_validator("watcher_interval_seconds")
+    @classmethod
+    def _clamp_watcher_interval(cls, v: int) -> int:
+        return max(30, min(300, v))
 
     @property
     def partial_levels(self) -> list[float]:

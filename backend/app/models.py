@@ -532,3 +532,74 @@ class MacroObservation(Base):
     realtime_end: Mapped[date | None] = mapped_column(Date)
     source: Mapped[str] = mapped_column(String, nullable=False, default="fred")
     ingested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# Market watcher (issue #12)
+class WatcherDecision(Base):
+    """One validated Haiku watcher assessment of a changed symbol."""
+    __tablename__ = "watcher_decisions"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String, nullable=False)  # IGNORE|WATCH|INVESTIGATE|...
+    event_type: Mapped[str | None] = mapped_column(String)
+    urgency: Mapped[str] = mapped_column(String, nullable=False)  # low | medium | high
+    evidence_ids: Mapped[list] = mapped_column(JSONB, nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    prompt_version: Mapped[str | None] = mapped_column(String)
+    model: Mapped[str | None] = mapped_column(String)
+    run_id: Mapped[str | None] = mapped_column(String, index=True)
+    signal_event_ids: Mapped[list] = mapped_column(JSONB, nullable=False)
+    downgraded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class ResearchJob(Base):
+    """Queue of follow-up work created by the watcher (consumers arrive in a later PR)."""
+    __tablename__ = "research_jobs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    job_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    kind: Mapped[str] = mapped_column(String, nullable=False)    # INVESTIGATE | REVIEW_POSITION
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    signal_event_ids: Mapped[list] = mapped_column(JSONB, nullable=False)
+    decision_id: Mapped[int | None] = mapped_column(ForeignKey("watcher_decisions.id"))
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    leased_by: Mapped[str | None] = mapped_column(String)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "worker_heartbeats"
+
+    worker: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_beat: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+
+class WatcherSymbolState(Base):
+    """Per-symbol previous observation the watcher compares against."""
+    __tablename__ = "watcher_symbol_state"
+
+    symbol: Mapped[str] = mapped_column(String, primary_key=True)
+    last_news_id: Mapped[int | None] = mapped_column(BigInteger)
+    last_price: Mapped[float | None] = mapped_column(Float)
+    last_price_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_bar_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    regime: Mapped[str | None] = mapped_column(String)
+    position_fingerprint: Mapped[str | None] = mapped_column(String)
+    last_assessed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_action: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(),
+                                                 onupdate=func.now())

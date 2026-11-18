@@ -33,3 +33,4 @@ PROGRESS.txt
 .claude/worktrees/
 .progress/*.tmp
 PROGRESS.txt.*.tmp
+backend/reports/

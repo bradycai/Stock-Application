@@ -184,6 +184,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_format: str = "json"
 
+    # --- backtest reports (PR 08) ---
+    backtest_report_dir: str = "reports"  # relative paths resolve against backend/
+
     @property
     def is_live(self) -> bool:
         return self.trading_mode.lower() == "live"

@@ -102,6 +102,12 @@ class BarStore:
         i = bisect_right(dates, d) - 1
         return self._bars[symbol][i] if i >= 0 and dates[i] == d else None
 
+    def bars_after(self, symbol: str, after: date) -> list[Bar]:
+        """Bars strictly AFTER `after` (never the `after` bar itself). Replay-only: the AI replay
+        simulates fills on bars the decision could not have seen, never on or before it."""
+        series = self._bars.get(symbol, ())
+        return list(series[bisect_right(self._dates.get(symbol, []), after):])
+
     def summary(self) -> dict:
         return {
             s: {"bars": len(b), "first": b[0].date.isoformat(), "last": b[-1].date.isoformat()}

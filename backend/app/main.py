@@ -8,6 +8,7 @@ from app import db_migrate
 from app.config import settings
 from app.logging_config import configure_logging, log_event
 from app.routers import analysis, automation, intents, journal, orders, portfolio
+from app.routers import backtests as backtests_router
 from app.routers import monitor as monitor_router
 from app.routers import risk as risk_router
 from app.routers import proposals as proposals_router
@@ -77,3 +78,4 @@ app.include_router(research_router.router)
 app.include_router(proposals_router.router)
 app.include_router(usage_router.router)
 app.include_router(watcher_router.router)
+app.include_router(backtests_router.router)

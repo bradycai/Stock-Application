@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--train-days", type=int, default=120)
     p.add_argument("--test-days", type=int, default=60)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--created-at", help="ISO timestamp: stamp the report with kind/created_at/summary "
+                                        "so the reports API lists it (omitted: output unchanged)")
     return p
 
 
@@ -68,6 +70,10 @@ def main(argv: list[str] | None = None, session=None) -> int:
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    if args.created_at:
+        from app.backtest import report_io
+        report = report_io.envelope("baseline", report_io.parse_created_at(args.created_at),
+                                    report_io.baseline_summary(report, args.start, args.end), report)
     text = json.dumps(report, indent=2, sort_keys=True, default=str)
     if args.out:
         with open(args.out, "w") as f:

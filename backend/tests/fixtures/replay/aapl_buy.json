@@ -1,0 +1,23 @@
+{
+  "decision_ts": "2026-03-02T15:30:00+00:00",
+  "symbol": "AAPL",
+  "model": "fake-opus",
+  "prompt_version": "trade_strategist@abc1234567",
+  "evidence": {
+    "quote:AAPL": {"id": "quote:AAPL", "kind": "quote", "value": {"last_price": 100.0},
+                   "as_of": "2026-03-02T15:25:00+00:00", "source": "alpaca"},
+    "ind:AAPL.rsi_14": {"id": "ind:AAPL.rsi_14", "kind": "indicator", "value": 58.0,
+                        "as_of": "2026-03-02T15:25:00+00:00", "source": "computed"},
+    "news:1": {"id": "news:1", "kind": "news", "value": "Apple beats estimates",
+               "as_of": "2026-03-02T14:00:00+00:00", "source": "wire"},
+    "fund:AAPL.revenue": {"id": "fund:AAPL.revenue", "kind": "fundamental", "value": 4e11,
+                          "as_of": "2026-01-30T00:00:00+00:00", "source": "sec"}
+  },
+  "proposal": {
+    "symbol": "AAPL", "action": "BUY", "confidence": 0.7, "thesis": "trend plus earnings catalyst",
+    "entry_low": 99.5, "entry_high": 100.5, "invalidation_price": 95.0, "take_profit_price": 110.0,
+    "position_size_percent": 4.0, "holding_horizon_days": 5, "exit_conditions": ["close below 95"],
+    "evidence_ids": ["quote:AAPL", "ind:AAPL.rsi_14", "news:1"], "conflicting_evidence": [],
+    "risks": ["guidance cut"], "limitations": [], "abstain_reason": ""
+  }
+}

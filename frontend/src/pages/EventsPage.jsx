@@ -13,7 +13,7 @@ function Section({ title, state, emptyText, children }) {
       {state.loading && <p className="muted">Loading…</p>}
       {state.error && <div className="banner banner-warn">Error: {state.error}</div>}
       {!state.loading && !state.error && state.empty && <p className="muted">{emptyText}</p>}
-      {!state.loading && !state.error && !state.empty && children}
+      {state.data != null && !state.empty && children /* stale data stays visible under an error */}
     </div>
   );
 }

@@ -204,3 +204,20 @@ body {
 @media (max-width: 700px) { .run-summary-grid { grid-template-columns: repeat(2, 1fr); } }
 
 .app-footer { text-align: center; margin-top: 24px; font-size: 12px; }
+
+/* Automation mode selector + kill switch */
+.kill-switch { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; margin: 8px 0 12px; border: 1px solid var(--border); border-radius: 8px; }
+.kill-switch-on { border-color: var(--neg); background: #2a1416; }
+.mode-select { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.mode-option { background: transparent; color: var(--text); border: 0; border-right: 1px solid var(--border);
+  padding: 8px 18px; cursor: pointer; font-size: 14px; }
+.mode-option:last-child { border-right: 0; }
+.mode-option:disabled { cursor: not-allowed; opacity: 0.45; }
+.mode-option-active { background: var(--accent); color: #fff; font-weight: 600; }
+@media (max-width: 520px) {
+  .kill-switch { flex-direction: column; align-items: stretch; }
+  .mode-select { display: flex; }
+  .mode-option { flex: 1; padding: 8px 6px; }
+}
+.mode-select ~ .auto-state { margin-top: 10px; }

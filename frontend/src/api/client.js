@@ -46,8 +46,13 @@ export const api = {
   haltTrading: () => request("/risk/halt", { method: "POST" }),
   resumeTrading: () => request("/risk/resume", { method: "POST" }),
   getAutomationStatus: () => request("/automation/status"),
-  enableAutomation: () => request("/automation/enable", { method: "POST" }),
-  disableAutomation: () => request("/automation/disable", { method: "POST" }),
+  setAutomationMode: (mode) =>
+    request("/automation/mode", { method: "POST", body: JSON.stringify({ mode }) }),
+  setKillSwitch: (engaged, reason) =>
+    request("/automation/kill-switch", {
+      method: "POST",
+      body: JSON.stringify({ engaged, reason: reason || null }),
+    }),
   getAutomationEvents: () => request("/automation/events"),
   clearAutomationEvents: () => request("/automation/events/clear", { method: "POST" }),
   getMonitorStatus: () => request("/monitor/status"),

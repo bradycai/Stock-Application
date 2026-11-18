@@ -4,9 +4,11 @@ export default function SettingsPage({ autoStatus, portfolio }) {
   const rows = autoStatus
     ? [
         ["Trading mode", autoStatus.is_paper ? "PAPER" : "LIVE"],
-        ["Automation capability", autoStatus.capability_allowed ? "Allowed" : "Blocked"],
+        ["Automation mode", autoStatus.mode],
+        ["Kill switch", autoStatus.kill_switch ? `ENGAGED — ${autoStatus.kill_switch_reason}` : "Off"],
+        ["Automation capability (server)", autoStatus.capability_allowed ? "Allowed" : "Blocked"],
         ["Capability reason", autoStatus.capability_reason],
-        ["Auto-trading active", autoStatus.active ? "Yes" : "No"],
+        ["Automated orders enabled", autoStatus.active ? "Yes" : "No"],
         ["Min confidence to auto-execute", `${autoStatus.min_confidence}%`],
         ["Monitor interval", `${Math.round(autoStatus.monitor_interval_sec / 60)} min`],
       ]

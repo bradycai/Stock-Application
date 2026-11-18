@@ -16,6 +16,7 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy import false as sa_false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -192,16 +193,23 @@ class PositionManagement(Base):
 
 
 class AutomationState(Base):
-    """Singleton (id=1) runtime toggle for autonomous trading, set via the API.
+    """Singleton (id=1) runtime automation state, set via the API.
 
-    The effective gate is: env AUTO_TRADING_ENABLED (+ live confirmation when live)
-    AND this runtime `enabled` flag. The env var is the capability ceiling; this row is
-    the user's on/off switch.
+    `mode` is the user's choice: manual (default — nothing is automated), observe
+    (automation evaluates and logs what it WOULD do, but places no orders), or auto. An
+    automated order needs BOTH this row (mode == "auto", kill switch off) AND the
+    environment (AUTO_TRADING_ENABLED, plus the live confirmation when live). The kill
+    switch persists until released and also blocks new buys from manual approval.
     """
     __tablename__ = "automation_state"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
-    enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1, autoincrement=False)
+    mode: Mapped[str] = mapped_column(String, default="manual", server_default="manual", nullable=False)
+    kill_switch: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa_false(),
+                                              nullable=False)
+    kill_switch_reason: Mapped[str | None] = mapped_column(String)
+    kill_switch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    kill_switch_by: Mapped[str | None] = mapped_column(String)
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_by: Mapped[str | None] = mapped_column(String)
     # Automation-event feed is hidden (not deleted) before this timestamp in the UI.

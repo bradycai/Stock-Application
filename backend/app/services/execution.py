@@ -18,7 +18,7 @@ from app.config import settings
 from app.deps import audit
 from app.logging_config import log_event
 from app.models import IntentStatus, Order, TradeIntent
-from app.services import broker, risk, risk_state
+from app.services import automation, broker, risk, risk_state
 from app.services.orchestrator import build_risk_input
 from app.services.recommendations import clamp_position_size
 
@@ -79,6 +79,23 @@ def execute_intent(db: Session, intent: TradeIntent, actor: str, *, auto: bool =
     # 0. Fail closed on stale proposals: an intent is only valid for a short window after
     #    the market snapshot it was based on.
     expire_if_stale(db, intent)
+
+    # 0b. Automation gates (defense in depth — automated callers check the gate too):
+    #     an automated order needs mode == auto + env capability + kill switch off, and the
+    #     kill switch blocks new buys even from manual approval. The intent stays pending.
+    gate = automation.order_gate(db)
+    blocked = None
+    if auto and not gate.allowed:
+        blocked = f"Automated order blocked: {gate.reason}"
+    elif gate.kill_switch and intent.action.value == "buy":
+        blocked = f"New buys are blocked: {gate.reason}"
+    if blocked:
+        audit(db, "auto_order_blocked", actor, intent_id=intent.id,
+              payload={"ticker": intent.ticker, "action": intent.action.value, "auto": auto,
+                       "mode": gate.mode, "kill_switch": gate.kill_switch, "reason": gate.reason})
+        log_event(logger, "order.blocked", logging.WARNING, intent_id=intent.id, ticker=intent.ticker,
+                  action=intent.action.value, actor=actor, auto=auto, reason=gate.reason)
+        raise ExecutionError(423, blocked)
 
     # 1. Fresh account/positions (state may have moved since the recommendation)
     try:

@@ -249,15 +249,16 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
 
     db.commit()
 
-    # 5. Optional autonomous execution. Only runs when automation is ACTIVE
-    #    (env capability + live confirmation when live + runtime switch ON). When
-    #    inactive — the default — this is a no-op and everything stays manual.
-    active, why = automation.auto_trading_active(db)
-    if active:
-        _auto_execute_eligible(db, out_intents)
+    # 5. Optional autonomous execution, decided by the single automation gate: env
+    #    capability + mode "auto" + kill switch off. In observe mode the same eligibility
+    #    logic runs but only records what WOULD have executed. In manual mode (the
+    #    default) nothing is automated and every intent waits for a human.
+    gate = automation.order_gate(db)
+    if gate.allowed or gate.observe:
+        _auto_execute_eligible(db, out_intents, observe=gate.observe)
     else:
         for row in out_intents:
-            log_event(logger, "auto_trade.skipped", ticker=row.ticker, reason=why)
+            log_event(logger, "auto_trade.skipped", ticker=row.ticker, reason=gate.reason)
 
     log_event(logger, "analysis.complete", tickers_screened=len(tickers), sent_to_claude=len(top_symbols),
               batches=batch_stats["batches"], failed_batches=batch_stats["failed_batches"],
@@ -276,7 +277,8 @@ def _run(db: Session, req: RunAnalysisRequest, tickers: list[str], run_key: str)
     )
 
 
-def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
+def _auto_execute_eligible(db: Session, intents: list[TradeIntent], *, observe: bool = False) -> None:
+    """Execute eligible intents, or (observe=True) only record that they would execute."""
     min_conf = float(settings.auto_min_confidence)
     for row in intents:
         if row.status != IntentStatus.pending_approval:
@@ -298,6 +300,15 @@ def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
             db.commit()
             log_event(logger, "auto_trade.skipped", ticker=row.ticker, reason=why, category=category)
             continue
+        if observe:
+            audit(db, "observe_would_execute", "automation", intent_id=row.id,
+                  payload={"ticker": row.ticker, "action": row.action.value,
+                           "confidence": round(confidence_pct, 1), "required_threshold": min_conf,
+                           "limit_price": float(row.limit_price or 0), "computed_qty": row.computed_qty})
+            db.commit()
+            log_event(logger, "auto_trade.observed", ticker=row.ticker, intent_id=row.id,
+                      action=row.action.value, confidence=round(confidence_pct, 1))
+            continue
         try:
             execute_intent(db, row, actor="automation", auto=True)
             db.commit()
@@ -306,7 +317,8 @@ def _auto_execute_eligible(db: Session, intents: list[TradeIntent]) -> None:
             audit(db, "auto_trade_rejected", "automation", intent_id=row.id,
                   payload={"ticker": row.ticker, "confidence": round(confidence_pct, 1),
                            "required_threshold": min_conf, "reason": str(e.detail),
-                           "rejected_by": "risk_engine", "violations": e.violations})
+                           "rejected_by": "risk_engine" if e.violations else "execution",
+                           "violations": e.violations})
             db.commit()
             log_event(logger, "auto_trade.rejected", ticker=row.ticker, reason=str(e.detail))
 

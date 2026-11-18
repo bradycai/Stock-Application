@@ -178,13 +178,28 @@ class RejectRequest(BaseModel):
 class AutomationStatusOut(BaseModel):
     capability_allowed: bool       # env permits automation at all
     capability_reason: str
-    runtime_enabled: bool          # the user's on/off switch
-    active: bool                   # capability AND runtime — effective state
+    mode: Literal["manual", "observe", "auto"]
+    runtime_enabled: bool          # mode == "auto" (kept for older clients)
+    observe: bool                  # observe-only: decisions logged, no orders
+    kill_switch: bool
+    kill_switch_reason: str | None = None
+    kill_switch_at: datetime | None = None
+    kill_switch_by: str | None = None
+    active: bool                   # automated orders may be placed right now
     active_reason: str
     trading_mode: str
     is_paper: bool
     min_confidence: float
     monitor_interval_sec: int
+
+
+class AutomationModeRequest(BaseModel):
+    mode: Literal["manual", "observe", "auto"]
+
+
+class KillSwitchRequest(BaseModel):
+    engaged: bool
+    reason: str | None = Field(default=None, max_length=300)
 
 
 class AutomationEventOut(BaseModel):

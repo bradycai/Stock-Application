@@ -237,6 +237,11 @@ STRATEGIST_WORKER_ENABLED=true python -m app.workers.strategist_worker   # from 
   it waits for approval (or the automation gate).
 - Single instance, Opus cost ceilings (`STRATEGIST_*_BUDGET_USD`), heartbeats,
   `GET /proposals`, `GET /proposals/{id}`.
+- **Dashboard:** the **Proposals** tab shows each proposal with the Opus recommendation, every
+  specialist report, the cited evidence (with source links), conflicts, limitations, the
+  reason to abstain and any validation or risk violations, and lets you approve or reject a
+  pending intent (approval re-checks risk and submits a **paper** order). The **Events** tab
+  shows the watcher's health, its decision feed and the research job queue, refreshed every 15s.
 
 ## Backtesting
 

@@ -103,6 +103,23 @@ with the lead session reviewing and integrating (full procedure: `.claude/skills
 - `.progress/` (per-issue state) and `PROGRESS.txt` are local and gitignored: the board rewrites
   itself every minute, so it is never committed.
 
+## Auto-merge (only when everything is good)
+
+`.github/workflows/auto-merge.yml` runs `tools/automerge_policy.py` after CI. A PR is merged
+automatically only if ALL hold: the repository variable `AUTOMERGE_ENABLED` is `true`; the
+PR has the `automerge` label, is open, not a draft, from this repository, and targets the
+default branch (`Production`); every required CI job passed on its current head commit; no
+review requests changes and it is mergeable; and it changes **no file covered by
+`.github/CODEOWNERS`** (risk, execution, broker, automation, monitor, config, models,
+migrations, secrets templates, CI, agent rules — these always need a human). The merge is
+pinned to the evaluated commit. The workflow runs the default branch's copy of the policy and
+never executes pull-request code, so a PR cannot change the rules to merge itself.
+
+- Dry run any PR: `python3 tools/automerge_policy.py --pr <n>` (prints every blocking reason).
+- The lead adds the `automerge` label only after its own review and verification; stacked PRs
+  must be retargeted to `Production` first. Never add the label to a PR that touches
+  protected files — it would be refused anyway.
+
 ## Definition of done
 
 - `ruff check app tests migrations` and `pytest -q` pass locally and in CI (including the

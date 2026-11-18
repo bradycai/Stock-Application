@@ -44,6 +44,9 @@ python3 "/Users/bradycai/Stock Application/tools/agent_progress.py" update <issu
 3. Live read-only check where mocks can't prove it (market data, streams) — never orders.
 4. Add docs, scan the new commits for secret values, push, open a draft PR closing the issue.
 5. `python3 tools/agent_progress.py integrate <issue> "<what was verified>"`.
+5b. If the PR touches no CODEOWNERS-protected file and targets `Production`, mark it ready and
+   add the `automerge` label (`gh pr ready <n> && gh pr edit <n> --add-label automerge`); check
+   with `python3 tools/automerge_policy.py --pr <n>`. Protected PRs wait for the user.
 6. Get an independent review (qa-security agent) for anything touching money movement.
 
 ## 5. Finish

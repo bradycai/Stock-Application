@@ -230,6 +230,12 @@ python -m app.backtest.run --symbols AAPL,MSFT,NVDA --start 2025-01-02 --end 202
   owned by `.github/CODEOWNERS` and need explicit human review.
 - Dependabot opens weekly dependency PRs; the Anthropic and Alpaca SDKs, SQLAlchemy,
   psycopg and Alembic always arrive as separate PRs.
+- **Auto-merge, only when everything is good:** label a PR `automerge` and, once switched on
+  (repository variable `AUTOMERGE_ENABLED=true`), it merges itself after CI if it targets
+  `Production`, isn't a draft, has all required checks green on its latest commit, has no
+  changes requested, is mergeable, and touches no CODEOWNERS-protected file — anything that
+  can move money or change the schema, config, CI or agent rules always waits for a human.
+  `python3 tools/automerge_policy.py --pr <n>` shows exactly why a PR would or wouldn't merge.
 - `CLAUDE.md` holds the rules for Claude Code in this repository (safety boundaries,
   commands, definition of done); `.claude/agents/` and `.claude/skills/` define the
   development agents and workflows (plan an issue, implement it, review a PR, fix CI, run

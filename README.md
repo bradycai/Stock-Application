@@ -370,6 +370,33 @@ docker compose --profile workers up -d       # opt in: stream, watcher, research
 - **Recovery:** research jobs are leased, so a job held by a crashed worker is picked up
   again when its lease expires; alerts are idempotent across watcher restarts.
 
+## Recurring jobs
+
+```bash
+SCHEDULER_ENABLED=true python -m app.workers.scheduler_worker      # from backend/; opt-in
+```
+
+One scheduler (single instance via a Postgres advisory lock, heartbeat `scheduler`) runs
+these on US/Eastern time, DST-aware. Every run is recorded in `scheduled_job_runs` with a
+unique (job, period), so a restart or a second worker never runs a period twice; a crashed
+run is retried after `SCHEDULER_STALE_RUN_SEC`, up to `SCHEDULER_MAX_ATTEMPTS`. A worker that
+was down past a job's grace window skips that period rather than running it late.
+
+- **Morning briefing** (weekdays 08:30): overnight news, latest quotes for the watchlist and
+  holdings, recent filings, macro observations, open alerts and yesterday's review, as a
+  deterministic digest (`GET /briefings`, `GET /briefings/latest`). An optional Claude
+  summary (`BRIEFING_LLM_SUMMARY`, off) uses the research role, is budget-checked first, sees
+  clipped headlines as untrusted data, and on any error the digest is stored without it.
+- **Candidate scanner** (`SCANNER_ENABLED`, off; every `SCANNER_INTERVAL_MIN` in market
+  hours): ranks symbols outside the watchlist and holdings with the deterministic prescreener
+  on stored data and enqueues the top `SCANNER_TOP_N` as research jobs, never more than
+  `SCANNER_MAX_JOBS_PER_DAY`. It never trades; those jobs only cost Claude budget if the
+  research worker is running.
+- **Weekly evaluation** (Saturday 10:00): the weekly review plus a walk-forward baseline
+  backtest and the AI replay, written to `BACKTEST_REPORT_DIR`. It only writes reports; it
+  never changes a setting, strategy or automation mode.
+- Runs: `GET /scheduler/runs`.
+
 ## Development workflow
 
 - `Production` is the default branch. Work happens on `agent/<issue>-<slug>` branches and

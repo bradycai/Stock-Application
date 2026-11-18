@@ -35,6 +35,8 @@ React (frontend/) ──▶ FastAPI (backend/app) ──▶ Alpaca (paper → li
   - `automation.py` — modes (manual/observe/auto), kill switch, and `order_gate()`, which every
     automated order path must check right before calling the broker.
   - `monitor.py` — background loop: safety backstop + optional continuous AI monitor.
+  - `scheduler/`, `scanner.py`, `briefing.py` — recurring jobs (idempotent per period);
+    `workers/scheduler_worker.py` runs them.
   - `ops/` — pure health checks, deduplicated `system_alerts`, the `/ops/status` snapshot and
     retention (dry run by default); `workers/health_watcher.py` runs the checks.
 - `backend/tests/` — pytest suite; pure logic, no network, no real broker or Claude calls.

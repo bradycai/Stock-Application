@@ -199,6 +199,7 @@ class Settings(BaseSettings):
     ops_research_failed_threshold: int = 3        # terminally failed research jobs (24h) that alert
     ops_reconcile_window_min: int = 120           # window for reconciliation mismatch events
     ops_reconcile_mismatch_threshold: int = 1     # mismatches in the window that raise an alert
+    ops_expect_market_stream: bool = False        # alert when the market_stream worker goes quiet
     # Retention (python -m app.services.ops.retention): days to keep; 0 = keep forever.
     retention_system_alerts_days: int = 0         # resolved alerts only
     retention_worker_heartbeats_days: int = 0     # heartbeat rows of workers that stopped

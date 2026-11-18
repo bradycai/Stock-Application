@@ -34,6 +34,10 @@ def expected_workers() -> list[str]:
         out.append("research_worker")
     if settings.strategist_worker_enabled:
         out.append("strategist_worker")
+    if settings.ops_expect_market_stream:
+        out.append("market_stream")
+    if getattr(settings, "scheduler_enabled", False):
+        out.append("scheduler")
     return out
 
 

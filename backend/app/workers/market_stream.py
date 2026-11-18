@@ -14,7 +14,8 @@ What it does
 - alpaca-py reconnects by itself. On top of that, every STREAM_REFILL_SEC a REST refill
   fetches 1Min bars missed since the last stored minute bar (at most
   STREAM_REFILL_MAX_MINUTES back). Bar writes are idempotent (uq_market_bars_key).
-- A structured heartbeat is logged every STREAM_HEARTBEAT_SEC.
+- A structured heartbeat is logged and written to worker_heartbeats (worker `market_stream`,
+  counts only) every STREAM_HEARTBEAT_SEC. A failed heartbeat write is logged, never fatal.
 
 This worker only reads and stores market data. It never places or changes orders.
 """
@@ -31,6 +32,7 @@ from app.config import settings
 from app.logging_config import log_event, safe_error
 from app.models import LatestQuote, MarketBar, Watchlist
 from app.services import market_data, news_store
+from app.services.watcher import heartbeat as hb
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,8 @@ class MarketStreamWorker:
         self._positions_symbols: set[str] = set()
         self.counts = {"quotes": 0, "bars": 0, "news": 0, "flush_errors": 0}
         self.last_message_at: datetime | None = None
+        self.started_at: datetime = self._now()
+        self.connected = False  # set by run(): True while the stream tasks are running
         # Set by run(); used to (un)subscribe on the live streams.
         self.stock_stream = None
         self.news_stream = None
@@ -308,6 +312,43 @@ class MarketStreamWorker:
                   news=self.counts["news"], flush_errors=self.counts["flush_errors"],
                   last_message_at=self.last_message_at.isoformat() if self.last_message_at else None,
                   subscribed=len(self.symbols), symbols=sorted(self.symbols)[:50])
+        self.write_heartbeat()
+
+    def heartbeat_details(self) -> dict:
+        """Counts and timestamps only: no symbols' prices, no secrets."""
+        with self._lock:
+            pending = {"quotes": len(self._quotes), "bars": len(self._bars), "news": len(self._news)}
+        return {
+            "subscribed_symbols": len(self.symbols), "feed": self.feed,
+            "connection": "connected" if self.connected else "disconnected",
+            "received": {k: self.counts[k] for k in ("quotes", "bars", "news")},
+            "buffered": pending, "flush_errors": self.counts["flush_errors"],
+            "last_message_at": self.last_message_at.isoformat() if self.last_message_at else None,
+        }
+
+    def write_heartbeat(self) -> bool:
+        """Upsert the DB heartbeat. Never raises: the stream outlives a failed write."""
+        db = None
+        try:
+            db = self.session_factory()
+            hb.beat(db, "market_stream", "running" if self.connected else "starting",
+                    self.heartbeat_details(), started_at=self.started_at, now=self._now())
+            db.commit()
+            return True
+        except Exception as e:
+            try:
+                if db is not None:
+                    db.rollback()
+            except Exception:
+                pass
+            log_event(logger, "stream_heartbeat_error", level=logging.WARNING, error=safe_error(e))
+            return False
+        finally:
+            try:
+                if db is not None:
+                    db.close()
+            except Exception:
+                pass
 
     # ----------------------------------------------------------------------- run
     async def _periodic(self, interval: float, fn, stop: asyncio.Event, *, immediate: bool = False) -> None:
@@ -350,6 +391,7 @@ class MarketStreamWorker:
         # alpaca-py blocks if (un)subscribe runs on the event loop while connected, so the
         # initial subscription happens before the streams start; later changes run in a thread.
         await asyncio.to_thread(self.refresh_symbols)
+        self.connected = True
         log_event(logger, "stream_worker_started", feed=self.feed, symbols=len(self.symbols))
         tasks = [
             asyncio.create_task(self._run_stream(self.stock_stream, stop)),
@@ -363,6 +405,7 @@ class MarketStreamWorker:
         ]
         await stop.wait()
         log_event(logger, "stream_worker_stopping")
+        self.connected = False
         for s in (self.stock_stream, self.news_stream):
             try:
                 await asyncio.wait_for(s.stop_ws(), timeout=5)

@@ -242,6 +242,8 @@ STRATEGIST_WORKER_ENABLED=true python -m app.workers.strategist_worker   # from 
   reason to abstain and any validation or risk violations, and lets you approve or reject a
   pending intent (approval re-checks risk and submits a **paper** order). The **Events** tab
   shows the watcher's health, its decision feed and the research job queue, refreshed every 15s.
+  Each decision shows the price and move **at decision time** (from its own signal events,
+  or the last completed minute bar before it), never later data.
 
 ## Backtesting
 
@@ -359,6 +361,8 @@ docker compose --profile workers up -d       # opt in: stream, watcher, research
   daily budget, the research-job backlog and failures, and reconciliation mismatches. It
   writes deduplicated alerts to `system_alerts` (one active alert per problem, with a count)
   and resolves them when the condition clears. It never calls the broker or Claude.
+  The market-stream worker writes a heartbeat (`market_stream`, counts only); set
+  `OPS_EXPECT_MARKET_STREAM=true` when you run it so a silent stream raises an alert.
 - **Ops API:** `GET /ops/status` (workers, queue, data freshness, spend per role, open alerts,
   recent redacted errors), `GET /ops/alerts`, `POST /ops/alerts/{id}/ack` (audited). Shown on
   the dashboard's Operations tab.

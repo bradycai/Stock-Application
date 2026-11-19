@@ -173,6 +173,45 @@ def test_bracket_exit_leg_closes_outcome_as_stop_loss(pg_db, fake_broker):
     assert out.benchmark_return_pct is None  # no SPY bars stored
 
 
+def test_first_sync_of_bracket_with_filled_leg_stores_json_safe_raw(pg_db, fake_broker):
+    """Regression (#56): the first sync of an already-filled bracket whose stop leg has filled
+    used to fail with "datetime is not JSON serializable" (legs carry their own filled_at)."""
+    _order(pg_db, _intent(pg_db, _run(pg_db)), status="new")
+    pg_db.commit()
+    leg_ts = T0 + timedelta(days=1)
+    leg = _details(price=95.0, filled_at=leg_ts, side="sell", order_type="stop")
+    fake_broker["details"]["b1"] = _details(legs=[leg])
+
+    counts = order_sync.sync_orders(pg_db)
+
+    assert counts["errors"] == 0 and counts["fills_recorded"] == 1
+    fill = pg_db.scalars(select(OrderFill)).one()
+    assert fill.raw["filled_at"] == T0.isoformat()
+    assert fill.raw["legs"][0]["filled_at"] == leg_ts.isoformat()
+    out = pg_db.scalars(select(TradeOutcome)).one()
+    assert out.status == "closed" and out.exit_reason == "stop_loss"
+
+
+def test_json_safe_converts_nested_broker_values():
+    import enum
+    import uuid
+    from datetime import date
+    from decimal import Decimal
+
+    class Side(enum.Enum):
+        SELL = "sell"
+
+    oid = uuid.UUID("12345678-1234-5678-1234-567812345678")
+    raw = order_sync._json_safe({
+        "id": oid, "price": Decimal("101.25"), "day": date(2026, 3, 2), "filled_at": None,
+        "legs": ({"side": Side.SELL, "filled_at": T0, "qty": 5, "ok": True},),
+    })
+    assert raw == {
+        "id": str(oid), "price": 101.25, "day": "2026-03-02", "filled_at": None,
+        "legs": [{"side": "sell", "filled_at": T0.isoformat(), "qty": 5, "ok": True}],
+    }
+
+
 def test_terminal_orders_are_not_polled_and_broker_errors_are_isolated(pg_db, fake_broker):
     intent = _intent(pg_db, _run(pg_db))
     _order(pg_db, intent, status="canceled", broker_id="done")

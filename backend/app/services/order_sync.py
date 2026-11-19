@@ -8,7 +8,8 @@ same period. It only READS from the broker; it never places, modifies or cancels
 so it is safe to run in every automation mode.
 """
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +34,22 @@ def _aware(ts: datetime | None) -> datetime | None:
     return ts
 
 
+def _json_safe(value):
+    """Make a broker snapshot storable in a JSON column, at any depth: bracket orders carry
+    their exit legs (each with its own `filled_at` datetime) in a nested list."""
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(getattr(value, "value", value))  # enums, UUIDs and anything else
+
+
 def _open_outcome(db: Session, symbol: str) -> TradeOutcome | None:
     return db.execute(
         select(TradeOutcome).where(TradeOutcome.symbol == symbol, TradeOutcome.status == "open")
@@ -54,7 +71,7 @@ def _record_fill(db: Session, order: Order, details: dict, status: str) -> bool:
         order_id=order.id, broker_order_id=order.broker_order_id, status=status,
         requested_qty=order.qty, filled_qty=filled_qty, filled_avg_price=price,
         filled_at=_aware(details.get("filled_at")),
-        raw={k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in details.items()},
+        raw=_json_safe(details),
     ))
     return True
 
